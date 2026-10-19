@@ -171,6 +171,12 @@ Dieses Projekt entsteht als Hobby — Elektronik aus Leidenschaft, ohne formale 
 
 ---
 
+## 📄 Lizenz
+
+[MIT](./LICENSE) — mit Hinweis auf das zugrunde liegende, unlizenzierte Ursprungsprojekt von [@andrei-tatar](https://github.com/andrei-tatar/imagotag-hack). Details in der [LICENSE](./LICENSE)-Datei.
+
+---
+
 ## 🙏 Credits
 
 Dieses Projekt basiert vollständig auf der Arbeit von **[@andrei-tatar](https://github.com/andrei-tatar/imagotag-hack)** — vielen Dank für die enorme Vorarbeit, die hier viel Zeit und Mühe gespart hat.
