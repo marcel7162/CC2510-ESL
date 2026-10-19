@@ -1,10 +1,12 @@
 # CC2510-ESL — Firmware für elektronische Preisschilder
 
-> 🇪🇸 Spanische Originalversion: [README.es.md](./README.es.md)
+> **ℹ️ Fork-Hinweis:** Dies ist **nicht meine eigene Arbeit**, sondern ein **Fork des ursprünglich von [Loryuwu](https://github.com/Loryuwu) entwickelten Projekts**, das ich für meine eigenen Bedürfnisse **erweitere** — Ziel: die Tags als Display für **Home Assistant** (Wetter & Haus-Infos) über Funk zu nutzen. Die ursprüngliche Firmware stammt von Loryuwu und basiert ihrerseits auf der Arbeit von [@andrei-tatar](https://github.com/andrei-tatar/imagotag-hack). Alle Credits siehe [unten](#-credits).
+>
+> 🇪🇸 Spanische Originalversion des READMEs: [README.es.md](./README.es.md)
 
 ![ESLs](./img/ESLs.jpg)
 
-Eigene Firmware für **elektronische Preisschilder (ESLs / Electronic Shelf Labels)** mit 2,2"- oder 4,2"-E-Paper-Display (einige 2,6"-Tags nutzen denselben MCU, aber nicht alle).
+Custom-Firmware für **elektronische Preisschilder (ESLs / Electronic Shelf Labels)** mit 2,2"- oder 4,2"-E-Paper-Display (einige 2,6"-Tags nutzen denselben MCU, aber nicht alle).
 Herzstück ist der **CC2510** von Texas Instruments — ein MCU auf Basis des alten 8051 mit integriertem **2,4-GHz-RF-Transceiver**.
 
 Das hier ist bewusst ein **Test- und Entwicklungsprojekt**, kein fertiges Produkt. Ziel ist, diese Tags zweckzuentfremden und als frei steuerbare E-Paper-Displays zu nutzen. Geplant sind separate Repos für den Access Point (AP), die Satelliten und die Steuersoftware; sobald die online sind, wird hier verlinkt.
@@ -179,6 +181,6 @@ Dieses Projekt entsteht als Hobby — Elektronik aus Leidenschaft, ohne formale 
 
 ## 🙏 Credits
 
-Dieses Projekt basiert vollständig auf der Arbeit von **[@andrei-tatar](https://github.com/andrei-tatar/imagotag-hack)** — vielen Dank für die enorme Vorarbeit, die hier viel Zeit und Mühe gespart hat.
-
-Weitere nützliche Quelle: der Blog von [@jirkabalhar](https://blog.jirkabalhar.cz/2023/12/hacking-sesimagotag-e-ink-price-tag) über das Ansteuern des reinen Screens eines SES-imagotag-Tags.
+- **[Loryuwu](https://github.com/Loryuwu)** — ursprünglicher Autor dieser CC2510-ESL-Firmware. Der Großteil des Codes und der Dokumentation stammt von ihm; dieses Repo ist nur ein Fork, den ich erweitere.
+- **[@andrei-tatar](https://github.com/andrei-tatar/imagotag-hack)** — Grundlage, auf der Loryuwus Firmware aufbaut. Vielen Dank für die enorme Vorarbeit.
+- **[@jirkabalhar](https://blog.jirkabalhar.cz/2023/12/hacking-sesimagotag-e-ink-price-tag)** — Blog über das Ansteuern des reinen Screens eines SES-imagotag-Tags.
