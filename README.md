@@ -130,6 +130,7 @@ CC2510-ESL/
 ├── firmware.hex          # fertiges Image zum Flashen
 ├── doc/                  # Datenblätter (CC2510, NFC, EPD, Flash, Boost)
 ├── documentacion/        # ausführliche Moduldoku (KI-erstellt)
+├── gateway/              # ESP32-Gateway (PlatformIO): HA ⇄ Funk ⇄ Tag
 ├── img/                  # Bilder
 └── src/
     ├── main.c            # Einstieg + Demo-Auswahl (siehe unten)
@@ -153,6 +154,16 @@ CC2510-ESL/
 ```
 
 ---
+
+## 📡 Gateway (Home-Assistant-Anbindung)
+
+Das Ziel dieses Forks: die Tags als Display für Home Assistant über Funk nutzen. Dafür gibt es ein **ESP32-Gateway** (PlatformIO) unter [`gateway/`](./gateway/):
+
+```
+Home Assistant ──(WiFi/MQTT)──► ESP32 ──(SPI)──► nRF24L01+PA+LNA ──(2,4 GHz)──► CC2510-Tag
+```
+
+Aufbau, Verdrahtung, Funk-Protokoll und offene Punkte stehen in der [Gateway-README](./gateway/README.md).
 
 ## ✨ Weiterführende Dokumentation
 
