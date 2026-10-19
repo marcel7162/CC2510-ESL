@@ -1,0 +1,26 @@
+# SDCC / 8051 Build-Artefakte
+*.rel
+*.asm
+*.lst
+*.sym
+*.rst
+*.lk
+*.map
+*.mem
+*.ihx
+*.adb
+*.cdb
+*.omf
+
+# Hinweis: firmware.hex wird bewusst eingecheckt (fertiges Image zum Flashen).
+
+# Python (cobs_test.py)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+*.swp
+*~

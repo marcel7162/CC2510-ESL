@@ -1,94 +1,94 @@
-# Documentación del Módulo EPD (Electronic Paper Display)
+# Dokumentation des EPD-Moduls (Electronic Paper Display)
 
-Este documento detalla el funcionamiento de las macros y funciones contenidas en el módulo `epd` (`epd.c` y `epd.h`), encargado del control de la pantalla de tinta electrónica.
+Dieses Dokument beschreibt die Makros und Funktionen des Moduls `epd` (`epd.c` und `epd.h`), das die Ansteuerung des E-Paper-Displays übernimmt.
 
-## Macros (`epd.h`)
+## Makros (`epd.h`)
 
-Las macros en este archivo definen la configuración de hardware, pines y parámetros de la pantalla.
+Die Makros definieren die Hardware-Konfiguration, Pins und Display-Parameter.
 
-### Definición de Pines y Hardware
-Estas macros mapean nombres abstractos a los registros físicos del microcontrolador CC2510.
+### Pin- und Hardware-Definitionen
+Diese Makros bilden abstrakte Namen auf die physischen Register des CC2510 ab.
 
-*   **`B_PWR`, `B_CS`, `B_DC`, `B_BUSY`, `B_RESET`**: Definen la posición del bit (0-7) en el puerto correspondiente para cada señal de control.
-*   **`EPD_PWR` (P0_0)**: Pin de alimentación de la pantalla.
-*   **`EPD_CS` (P0_1)**: Chip Select (Selección de chip) para la comunicación SPI.
-*   **`EPD_DC` (P1_2)**: Data/Command. Determina si lo que se envía es un comando o un dato.
-*   **`EPD_BUSY` (P1_3)**: Pin de entrada que indica si la pantalla está ocupada procesando una operación.
-*   **`EPD_RESET` (P2_0)**: Pin de reinicio (Reset) por hardware.
+*   **`B_PWR`, `B_CS`, `B_DC`, `B_BUSY`, `B_RESET`**: Bit-Position (0–7) im jeweiligen Port für jedes Steuersignal.
+*   **`EPD_PWR` (P0_0)**: Versorgungspin des Displays.
+*   **`EPD_CS` (P0_1)**: Chip Select für die SPI-Kommunikation.
+*   **`EPD_DC` (P1_2)**: Data/Command. Legt fest, ob ein Befehl oder ein Datum gesendet wird.
+*   **`EPD_BUSY` (P1_3)**: Eingang, zeigt an, ob das Display gerade beschäftigt ist.
+*   **`EPD_RESET` (P2_0)**: Hardware-Reset-Pin.
 
-### Control de Estado (Nivel Bajo)
-Estas macros simplifican el cambio de estado de los pines de control.
+### Zustandssteuerung (Low-Level)
+Diese Makros vereinfachen das Umschalten der Steuerpins.
 
-*   **`EPD_PWR_ON` / `EPD_PWR_OFF`**: Enciende (`0`) o apaga (`1`) la alimentación de la pantalla. *Nota: Parece usar lógica activa baja o controlar un transistor PNP/MOSFET canal P.*
-*   **`EPD_RESET_ON` / `EPD_RESET_OFF`**: Activa (`0`) o desactiva (`1`) la señal de Reset. Es activo bajo.
-*   **`EPD_SELECT` / `EPD_DESELECT`**: Activa (`0`) o desactiva (`1`) la comunicación SPI con la pantalla.
-*   **`EPD_CMDMODE`**: Pone el pin DC en bajo (`0`) para indicar que se enviará un **comando**.
-*   **`EPD_DATAMODE`**: Pone el pin DC en alto (`1`) para indicar que se enviarán **datos**.
+*   **`EPD_PWR_ON` / `EPD_PWR_OFF`**: Schaltet die Versorgung ein (`0`) oder aus (`1`). *Hinweis: nutzt offenbar Active-Low-Logik bzw. steuert einen PNP-/P-Kanal-MOSFET.*
+*   **`EPD_RESET_ON` / `EPD_RESET_OFF`**: Aktiviert (`0`) oder deaktiviert (`1`) das Reset-Signal. Active Low.
+*   **`EPD_SELECT` / `EPD_DESELECT`**: Aktiviert (`0`) oder deaktiviert (`1`) die SPI-Kommunikation mit dem Display.
+*   **`EPD_CMDMODE`**: Setzt DC auf LOW (`0`) → es folgt ein **Befehl**.
+*   **`EPD_DATAMODE`**: Setzt DC auf HIGH (`1`) → es folgen **Daten**.
 
-### Configuración de Pantalla
-*   **`EPD_SIZE`**: Define el tamaño físico de la pantalla (ej. 266 para 2.66 pulgadas).
-*   **`HRES` / `VRES`**: Resolución horizontal y vertical, definidas automáticamente según `EPD_SIZE`.
-*   **`BUFFER_SIZE`**: Calcula el tamaño en bytes necesario para almacenar una imagen completa (`HRES / 8 * VRES`).
+### Display-Konfiguration
+*   **`EPD_SIZE`**: Physische Displaygröße (z. B. 266 für 2,66 Zoll).
+*   **`HRES` / `VRES`**: Horizontale/vertikale Auflösung, automatisch anhand von `EPD_SIZE` gesetzt.
+*   **`BUFFER_SIZE`**: Größe in Bytes für ein komplettes Bild (`HRES / 8 * VRES`).
 
 ---
 
-## Funciones (`epd.c`)
+## Funktionen (`epd.c`)
 
-### Funciones de Inicialización y Control
+### Initialisierung und Steuerung
 
 #### `void epd_init()`
-*   **Qué hace:** Inicializa el periférico SPI (USART0) del CC2510 y configura los pines GPIO necesarios. Luego, enciende la pantalla, realiza un reinicio por hardware y software, y envía configuraciones iniciales (como el sensor de temperatura).
-*   **Detalle:** Configura la velocidad de baudios, modo SPI (Master), y dirección de los pines. Es la primera función que debe llamarse.
+*   **Zweck:** Initialisiert das SPI-Peripherieteil (USART0) des CC2510 und die nötigen GPIOs. Schaltet dann das Display ein, führt Hardware- und Software-Reset durch und sendet Grundeinstellungen (z. B. Temperatursensor).
+*   **Detail:** Setzt Baudrate, SPI-Modus (Master) und Pin-Richtungen. Muss als erste Funktion aufgerufen werden.
 
 #### `void epdReset(uint32_t ms1, uint32_t ms2, uint32_t ms3, uint32_t ms4, uint32_t ms5)`
-*   **Qué hace:** Realiza una secuencia de reinicio por hardware toggling el pin `RESET`.
-*   **Detalle:** Permite especificar los tiempos de espera (en milisegundos) entre cada cambio de estado del pin RESET. Es útil para cumplir con los tiempos específicos requeridos por el controlador de la pantalla al encenderse.
+*   **Zweck:** Führt eine Hardware-Reset-Sequenz durch, indem der `RESET`-Pin getoggelt wird.
+*   **Detail:** Erlaubt es, die Wartezeiten (in Millisekunden) zwischen den Zustandswechseln anzugeben — nützlich, um die vom Controller beim Einschalten geforderten Timings einzuhalten.
 
 #### `void softReset()`
-*   **Qué hace:** Envía un comando de reinicio por software (`0x00`) al controlador de la pantalla.
-*   **Diferencia con `epdReset`:** `epdReset` usa el pin físico eléctrico. `softReset` envía una instrucción digital. Generalmente se usan ambos durante la inicialización.
+*   **Zweck:** Sendet einen Software-Reset-Befehl (`0x00`) an den Controller.
+*   **Unterschied zu `epdReset`:** `epdReset` nutzt den physischen Reset-Pin, `softReset` eine digitale Instruktion. Bei der Initialisierung werden meist beide verwendet.
 
 #### `void epd_waitBusy()`
-*   **Qué hace:** Bloquea la ejecución del programa hasta que la pantalla deje de estar ocupada.
-*   **Detalle:** Monitorea el pin `EPD_BUSY`. Incluye un pequeño retardo de seguridad al final. Es crucial llamar a esto después de comandos que toman tiempo (como refrescar la pantalla) para no enviar datos antes de que la pantalla esté lista.
+*   **Zweck:** Blockiert die Programmausführung, bis das Display nicht mehr beschäftigt ist.
+*   **Detail:** Überwacht den `EPD_BUSY`-Pin, mit einer kleinen Sicherheitsverzögerung am Ende. Nach zeitintensiven Befehlen (z. B. Refresh) zwingend aufzurufen, damit keine Daten gesendet werden, bevor das Display bereit ist.
 
 #### `void DCDC_powerOn()`
-*   **Qué hace:** Envía el comando (`0x04`) para encender el convertidor DC/DC interno de la pantalla.
-*   **Detalle:** Necesario para generar los altos voltajes requeridos para mover la tinta electrónica.
+*   **Zweck:** Sendet den Befehl (`0x04`) zum Einschalten des internen DC/DC-Wandlers.
+*   **Detail:** Nötig, um die für die E-Tinte erforderlichen Hochspannungen zu erzeugen.
 
 #### `void powerOff()`
-*   **Qué hace:** Apaga el convertidor DC/DC y pone la pantalla y los pines del microcontrolador en modo de bajo consumo/seguro.
-*   **Detalle:** Se debe llamar después de terminar de actualizar la pantalla para ahorrar energía y proteger el display.
+*   **Zweck:** Schaltet den DC/DC-Wandler ab und versetzt Display und MCU-Pins in einen sicheren/sparsamen Zustand.
+*   **Detail:** Nach jedem Display-Update aufzurufen, um Energie zu sparen und das Display zu schützen.
 
-### Funciones de Dibujo y Actualización
+### Zeichnen und Aktualisieren
 
 #### `void globalUpdate(const uint8_t * data1s, const uint8_t * data2s)`
-*   **Qué hace:** Envía dos buffers de imagen completos a la pantalla y luego dispara la actualización visual.
-*   **Detalle:** Las pantallas E-Ink suelen tener dos buffers de memoria (ej. para el estado actual y el siguiente, o para color negro y rojo). Esta función llena ambos y llama a `flushDisplay`.
+*   **Zweck:** Sendet zwei vollständige Bildpuffer an das Display und löst dann die Aktualisierung aus.
+*   **Detail:** E-Ink-Displays haben meist zwei Speicherpuffer (z. B. aktueller und nächster Zustand, oder Schwarz und Rot). Diese Funktion füllt beide und ruft `flushDisplay` auf.
 
 #### `void epd_clearDisplay()`
-*   **Qué hace:** Borra la pantalla (la pone en blanco/limpia).
-*   **Detalle:** Envía bytes `0x00` a toda la memoria de la pantalla usando `sendColor` y luego actualiza. Es una forma rápida de limpiar sin necesitar un buffer de imagen en la RAM del microcontrolador.
+*   **Zweck:** Löscht das Display (setzt es auf Weiß).
+*   **Detail:** Sendet `0x00`-Bytes an den gesamten Displayspeicher (über `sendColor`) und aktualisiert dann. Schnelles Löschen ohne Bildpuffer im MCU-RAM.
 
 #### `void flushDisplay()`
-*   **Qué hace:** Inicia la secuencia de refresco de la pantalla (`0x12`).
-*   **Detalle:** Esto es lo que realmente hace que la imagen cambie físicamente. Antes de esto, solo se están escribiendo datos en la memoria interna del controlador. Enciende el DC/DC automáticamente.
+*   **Zweck:** Startet die Refresh-Sequenz (`0x12`).
+*   **Detail:** Erst das lässt das Bild physisch wechseln. Davor werden nur Daten in den internen Speicher des Controllers geschrieben. Schaltet den DC/DC automatisch ein.
 
-### Funciones de Comunicación (Bajo Nivel)
+### Kommunikation (Low-Level)
 
 #### `void sendIndexData(uint8_t index, const uint8_t *data, uint32_t len)`
-*   **Qué hace:** Envía un comando (`index`) seguido de una secuencia de bytes de datos (`data`).
-*   **Uso:** Para enviar configuraciones o bloques de imagen que ya están en un array.
-*   **Diferencia:** Maneja automáticamente el cambio entre modo Comando y modo Datos, y el Chip Select.
+*   **Zweck:** Sendet einen Befehl (`index`), gefolgt von einer Byte-Folge (`data`).
+*   **Verwendung:** Zum Senden von Einstellungen oder Bildblöcken, die bereits in einem Array vorliegen.
+*   **Besonderheit:** Wechselt automatisch zwischen Befehls- und Datenmodus und steuert Chip Select.
 
 #### `void sendColor(uint8_t index, const uint8_t data, uint32_t len)`
-*   **Qué hace:** Envía un comando (`index`) y luego envía **el mismo byte** (`data`) repetido `len` veces.
-*   **Diferencia con `sendIndexData`:** `sendIndexData` recorre un array de datos distintos. `sendColor` repite un solo valor. Es muy eficiente para llenar la pantalla de un solo color (ej. todo blanco o todo negro) sin gastar RAM del microcontrolador en un buffer.
+*   **Zweck:** Sendet einen Befehl (`index`) und danach **dasselbe Byte** (`data`) `len`-mal wiederholt.
+*   **Unterschied zu `sendIndexData`:** `sendIndexData` durchläuft ein Array verschiedener Daten; `sendColor` wiederholt einen einzigen Wert. Sehr effizient, um das Display einfarbig zu füllen (z. B. ganz weiß/schwarz), ohne MCU-RAM für einen Puffer zu verbrauchen.
 
 #### `void sendCommand(uint8_t cmd)`
-*   **Qué hace:** Envía un único byte interpretado como comando.
-*   **Detalle:** Pone `EPD_DC` en bajo antes de enviar.
+*   **Zweck:** Sendet ein einzelnes Byte als Befehl.
+*   **Detail:** Setzt `EPD_DC` vor dem Senden auf LOW.
 
 #### `void sendData(uint8_t data)`
-*   **Qué hace:** Envía un único byte interpretado como dato (parámetro de un comando).
-*   **Detalle:** Pone `EPD_DC` en alto antes de enviar.
+*   **Zweck:** Sendet ein einzelnes Byte als Datum (Parameter eines Befehls).
+*   **Detail:** Setzt `EPD_DC` vor dem Senden auf HIGH.

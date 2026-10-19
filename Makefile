@@ -1,30 +1,40 @@
-FLASH_SIZE = 0x7FFF # 32KB flash
+# ============================================================
+#  Makefile fuer das CC2510-ESL Firmware (SDCC / 8051)
+#  Erkennt automatisch Windows vs. Linux/macOS.
+# ============================================================
+
+FLASH_SIZE = 0x7FFF   # 32 KB Flash
 
 XRAM_START = 0xF000
-XRAM_SIZE = 0xF00 # slow RAM
+XRAM_SIZE  = 0xF00    # langsamer RAM
 
-IRAM_SIZE = 0x100 # fast RAM
-
-#SHELL = sh -xv
+IRAM_SIZE  = 0x100    # schneller RAM
 
 TARGET = firmware
-
-#SRC = $(shell find . -type f -name "*.c") #linux
-SRC = $(wildcard *.c */*.c */*/*.c) #windows
-REL = $(patsubst %.c, %.rel, $(SRC)) 
-ASM = $(patsubst %.c, %.asm, $(SRC)) 
-LST = $(patsubst %.c, %.lst, $(SRC)) 
-SYM = $(patsubst %.c, %.sym, $(SRC)) 
-RST = $(patsubst %.c, %.rst, $(SRC)) 
-FRM = $(TARGET).lk $(TARGET).map $(TARGET).mem $(TARGET).hex $(TARGET).ihx
 
 CC = sdcc
 SDCC_FLAGS = --model-small --opt-code-speed
 LDFLAGS_FLASH = \
---out-fmt-ihx \
---code-loc 0x000 --code-size $(FLASH_SIZE) \
---xram-loc $(XRAM_START) --xram-size $(XRAM_SIZE) \
---iram-size $(IRAM_SIZE)
+	--out-fmt-ihx \
+	--code-loc 0x000 --code-size $(FLASH_SIZE) \
+	--xram-loc $(XRAM_START) --xram-size $(XRAM_SIZE) \
+	--iram-size $(IRAM_SIZE)
+
+# ------------------------------------------------------------
+#  Plattform-Erkennung: Quelldateien finden + clean-Befehl.
+#  Unter Windows setzt die Umgebung OS=Windows_NT.
+# ------------------------------------------------------------
+ifeq ($(OS),Windows_NT)
+	SRC = $(wildcard *.c */*.c */*/*.c)
+	CLEAN = for /r %%f in (*.rel *.asm *.lst *.sym *.rst *.lk *.map *.mem *.ihx) do del /q "%%f" 2>nul
+else
+	SRC = $(shell find . -type f -name "*.c")
+	CLEAN = find . -type f \( -name '*.rel' -o -name '*.asm' -o -name '*.lst' \
+	          -o -name '*.sym' -o -name '*.rst' -o -name '*.lk' -o -name '*.map' \
+	          -o -name '*.mem' -o -name '*.ihx' \) -delete
+endif
+
+REL = $(patsubst %.c, %.rel, $(SRC))
 
 all: $(TARGET).hex
 
@@ -32,15 +42,14 @@ all: $(TARGET).hex
 	$(CC) -c $(SDCC_FLAGS) -DBUILD -c -o $*.rel $<
 
 $(TARGET).ihx: $(REL)
-	$(CC) $(LDFLAGS_FLASH) $(SDCC_FLAGS) -o $(TARGET).ihx $(REL) 
+	$(CC) $(LDFLAGS_FLASH) $(SDCC_FLAGS) -o $(TARGET).ihx $(REL)
 
 $(TARGET).hex: $(TARGET).ihx
 	packihx $(TARGET).ihx > $(TARGET).hex
 
-
 clean:
-	@echo Limpiando archivos generados...
-	@for /r %%f in (*.rel *.asm *.lst *.sym *.rst *.lk *.map *.mem *.ihx) do del /q "%%f" 2>nul
-	@echo Limpieza completa.
+	@echo Loesche generierte Dateien...
+	@$(CLEAN)
+	@echo Bereinigung abgeschlossen.
 
-.PHONY: clean
+.PHONY: all clean

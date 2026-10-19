@@ -1,112 +1,112 @@
-# Comandos del Controlador de Pantalla (Serie UC81xx)
+# Befehle des Display-Controllers (Serie UC81xx)
 
-Este documento detalla todos los comandos admitidos por el controlador de la pantalla de tinta electrónica (Serie UC81xx, como el UC8151/UC8176). Estos comandos se envían a través del bus SPI con el pin **DC** (Data/Command) en bajo (`0`) para el índice del comando y en alto (`1`) para sus parámetros.
+Dieses Dokument beschreibt alle Befehle, die der E-Paper-Display-Controller (Serie UC81xx, z. B. UC8151/UC8176) unterstützt. Die Befehle werden über den SPI-Bus gesendet, wobei der Pin **DC** (Data/Command) für den Befehlsindex auf LOW (`0`) und für dessen Parameter auf HIGH (`1`) liegt.
 
-## Tabla de Referencia Rápida
+## Schnellübersicht
 
-| Hex  | Comando (Nombre) | Parámetros | Descripción |
+| Hex  | Befehl (Name) | Parameter | Beschreibung |
 | :--- | :--- | :---: | :--- |
-| `0x00` | **PSR** (Panel Setting) | 2 | Configura resolución, modo de color, etc. |
-| `0x01` | **PWR** (Power Setting) | 5 | Configura voltajes de VGH, VGL, VDH, VDL. |
-| `0x02` | **POF** (Power OFF) | 0 | Apaga el sistema DC/DC y detiene la salida PWM. |
-| `0x03` | **PFS** (Power OFF Sequence) | 1 | Define el tiempo de caída de voltajes. |
-| `0x04` | **PON** (Power ON) | 0 | Enciende el sistema DC/DC y habilita salidas de voltaje. |
-| `0x05` | **PMES** (Power ON Measure) | 0 | Mide voltajes internos (autodiagnóstico). |
-| `0x06` | **BTST** (Booster Soft Start) | 3 | Configura el arranque suave de los Boosters. |
-| `0x07` | **DSLP** (Deep Sleep) | 1 | Entra en modo de consumo ultra bajo. |
-| `0x10` | **DTM1** (Data Start Transmission 1) | Buffer | Envía el primer frame (Negro/Blanco). |
-| `0x11` | **DRF** (Display Refresh) | 0 | Inicia el refresco físico de la pantalla. |
-| `0x12` | **DSP** (Display Start) | 0 | Similar a 0x11, inicia la visualización. |
-| `0x13` | **DTM2** (Data Start Transmission 2) | Buffer | Envía el segundo frame (Rojo/Color). |
-| `0x20` | **LUTC** (VCOM LUT) | Variable | Tabla de consulta para voltajes VCOM. |
-| `0x21` | **LUTW** (White LUT) | Variable | Tabla de consulta para transiciones a blanco. |
-| `0x22` | **LUTB** (Black LUT) | Variable | Tabla de consulta para transiciones a negro. |
-| `0x23` | **LUTR** (Red LUT) | Variable | Tabla de consulta para transiciones a rojo. |
-| `0x24` | **LUTV** (VBD LUT) | Variable | Tabla de consulta para el borde (Border). |
-| `0x30` | **OSC** (PLL Control) | 1 | Configura la frecuencia del oscilador interno. |
-| `0x40` | **TSC** (Temperature Sensor) | 1 | Lee o selecciona el sensor de temperatura. |
-| `0x50` | **CDI** (VCOM and Data Interval) | 1 | Configura el intervalo de VCOM y datos de borde. |
-| `0x60` | **TCON** (TCON Setting) | 1 | Configura los retardos de S2G y G2S. |
-| `0x61` | **TRES** (Resolution Setting) | 3 | Define la resolución de la pantalla. |
-| `0x82` | **VDCS** (VCOM DC Setting) | 1 | Configura el voltaje DC de VCOM. |
-| `0xE0` | **CASCADE** (Cascade Setting) | 1 | Configura modo cascada para pantallas múltiples. |
-| `0xE5` | **TSSET** (Temperature Set) | 1 | Establece manualmente la temperatura de trabajo. |
+| `0x00` | **PSR** (Panel Setting) | 2 | Auflösung, Farbmodus usw. |
+| `0x01` | **PWR** (Power Setting) | 5 | Spannungen VGH, VGL, VDH, VDL. |
+| `0x02` | **POF** (Power OFF) | 0 | Schaltet DC/DC ab und stoppt die PWM-Ausgabe. |
+| `0x03` | **PFS** (Power OFF Sequence) | 1 | Abfallzeit der Spannungen. |
+| `0x04` | **PON** (Power ON) | 0 | Schaltet DC/DC ein, aktiviert die Spannungsausgänge. |
+| `0x05` | **PMES** (Power ON Measure) | 0 | Misst interne Spannungen (Selbstdiagnose). |
+| `0x06` | **BTST** (Booster Soft Start) | 3 | Sanftanlauf der Booster. |
+| `0x07` | **DSLP** (Deep Sleep) | 1 | Ultra-Niedrigverbrauchsmodus. |
+| `0x10` | **DTM1** (Data Start Transmission 1) | Buffer | Sendet das erste Frame (Schwarz/Weiß). |
+| `0x11` | **DRF** (Display Refresh) | 0 | Startet den physischen Refresh des Displays. |
+| `0x12` | **DSP** (Display Start) | 0 | Ähnlich wie 0x11, startet die Anzeige. |
+| `0x13` | **DTM2** (Data Start Transmission 2) | Buffer | Sendet das zweite Frame (Rot/Farbe). |
+| `0x20` | **LUTC** (VCOM LUT) | variabel | Look-Up-Table für VCOM-Spannungen. |
+| `0x21` | **LUTW** (White LUT) | variabel | LUT für Übergänge nach Weiß. |
+| `0x22` | **LUTB** (Black LUT) | variabel | LUT für Übergänge nach Schwarz. |
+| `0x23` | **LUTR** (Red LUT) | variabel | LUT für Übergänge nach Rot. |
+| `0x24` | **LUTV** (VBD LUT) | variabel | LUT für den Rand (Border). |
+| `0x30` | **OSC** (PLL Control) | 1 | Frequenz des internen Oszillators. |
+| `0x40` | **TSC** (Temperature Sensor) | 1 | Liest/wählt den Temperatursensor. |
+| `0x50` | **CDI** (VCOM and Data Interval) | 1 | VCOM- und Rand-Datenintervall. |
+| `0x60` | **TCON** (TCON Setting) | 1 | Verzögerungen S2G und G2S. |
+| `0x61` | **TRES** (Resolution Setting) | 3 | Auflösung des Displays. |
+| `0x82` | **VDCS** (VCOM DC Setting) | 1 | DC-Spannung von VCOM. |
+| `0xE0` | **CASCADE** (Cascade Setting) | 1 | Kaskadenmodus für mehrere Displays. |
+| `0xE5` | **TSSET** (Temperature Set) | 1 | Setzt die Arbeitstemperatur manuell. |
 
 ---
 
-## Detalle de Comandos Principales
+## Details der wichtigsten Befehle
 
 ### `0x00` PSR (Panel Setting)
-Configura aspectos fundamentales del panel.
+Konfiguriert grundlegende Panel-Eigenschaften.
 - **Byte 1**: `[RES1 RES0] [REG] [KW/R] [UD] [SHL] [SHD_N] [RST_N]`
-    - `RES[1:0]`: Resolución (ej. 00=160x296, 01=128x296, 11=TRES defines).
-    - `REG`: 0=Externa, 1=Interna (LDO).
-    - `KW/R`: 0=B/W/R (3 colores), 1=B/W (2 colores).
-    - `UD`: 0=Scan Arriba a Abajo, 1=Abajo a Arriba.
-    - `SHL`: 0=Scan Izquierda a Derecha, 1=Derecha a Izquierda.
-    - `SHD_N`: 0=Booster OFF, 1=Booster ON.
-    - `RST_N`: 0=Soft Reset, 1=Normal.
+    - `RES[1:0]`: Auflösung (z. B. 00=160x296, 01=128x296, 11=TRES legt fest).
+    - `REG`: 0=extern, 1=intern (LDO).
+    - `KW/R`: 0=S/W/R (3 Farben), 1=S/W (2 Farben).
+    - `UD`: 0=Scan oben→unten, 1=unten→oben.
+    - `SHL`: 0=Scan links→rechts, 1=rechts→links.
+    - `SHD_N`: 0=Booster AUS, 1=Booster AN.
+    - `RST_N`: 0=Soft-Reset, 1=Normal.
 
-### `0x10` y `0x13` Transmisión de Imagen
-- **`0x10` (DTM1)**: Recibe una cantidad de bytes igual a `(Ancho / 8) * Alto`. Cada bit `1` representa Blanco y `0` representa Negro.
-- **`0x13` (DTM2)**: En pantallas de 3 colores, este buffer define el componente Rojo.
+### `0x10` und `0x13` Bildübertragung
+- **`0x10` (DTM1)**: Empfängt `(Breite / 8) * Höhe` Bytes. Jedes Bit `1` = Weiß, `0` = Schwarz.
+- **`0x13` (DTM2)**: Bei 3-Farben-Displays definiert dieser Puffer den Rot-Anteil.
 
 ### `0x50` CDI (VCOM and Data Interval Setting)
-Crucial para el aspecto del borde de la pantalla y el refresco.
+Entscheidend für das Aussehen des Rands und den Refresh.
 - **Byte 1**: `[VBD1 VBD0] [DDX1 DDX0] [CDI3 CDI2 CDI1 CDI0]`
-    - `VBD`: Color del borde (B/W/R).
-    - `DDX`: Control de datos (si se invierten o no).
-    - `CDI`: Tiempo de intervalo entre frames.
+    - `VBD`: Randfarbe (S/W/R).
+    - `DDX`: Datensteuerung (invertiert oder nicht).
+    - `CDI`: Intervallzeit zwischen Frames.
 
 ---
 
-## Cómo se usan en este proyecto
+## Nutzung in diesem Projekt
 
-En el archivo [epd.c](file:///c:/Users/pablo/Desktop/Lory/cosas%20varias/CC25xx/imagotag-hack-master/firmware/src/display/epd.c), estos comandos se implementan mediante funciones de conveniencia:
+In [`epd.c`](./epd.c) werden diese Befehle über Komfortfunktionen umgesetzt:
 
-1.  **Inicialización**: Se usa `epd_init()` que envía `0x00`, `0xE0`, `0xE5` y otros para preparar el panel.
-2.  **Limpieza**: `epd_clearDisplay()` usa `0x10` y `0x13` enviando ceros para borrar la memoria.
-3.  **Actualización**: `epd_flushDisplay()` llama a `0x04` (Power ON), envía `0x11` (Refresh), espera el pin `BUSY` y finalmente llama a `0x02` (Power OFF).
-4.  **Streaming**: Las funciones `epd_stream_start(index)` permiten iniciar el envío de una imagen (usando `0x10` o `0x13`) y mandar los datos por piezas.
+1.  **Initialisierung**: `epd_init()` sendet `0x00`, `0xE0`, `0xE5` u. a., um das Panel vorzubereiten.
+2.  **Löschen**: `epd_clearDisplay()` nutzt `0x10` und `0x13` und sendet Nullen, um den Speicher zu leeren.
+3.  **Aktualisierung**: `epd_flushDisplay()` ruft `0x04` (Power ON) auf, sendet `0x11` (Refresh), wartet auf den `BUSY`-Pin und ruft schließlich `0x02` (Power OFF) auf.
+4.  **Streaming**: `epd_stream_start(index)` beginnt eine Bildübertragung (mit `0x10` oder `0x13`) und erlaubt, die Daten stückweise zu senden.
 
-## Parámetros de Seguridad y Tiempos
-- Siempre se debe verificar el pin **BUSY** (`0` es ocupado) después de comandos como `0x04` (Power ON), `0x11`/`0x12` (Refresh) y `0x00` (Reset).
-- Los comandos de voltaje (`0x01`, `0x82`) pueden dañar la pantalla si se configuran fuera de los rangos del fabricante.
+## Sicherheits- und Timing-Hinweise
+- Nach Befehlen wie `0x04` (Power ON), `0x11`/`0x12` (Refresh) und `0x00` (Reset) stets den **BUSY**-Pin prüfen (`0` = beschäftigt).
+- Spannungsbefehle (`0x01`, `0x82`) können das Display beschädigen, wenn sie außerhalb der Herstellerbereiche gesetzt werden.
 
 ---
 
-## Actualización Parcial (Partial Refresh)
+## Teil-Refresh (Partial Refresh)
 
-Para actualizar solo un sector de la pantalla (por ejemplo, un reloj o un contador) sin que toda la pantalla parpadee, se utiliza el modo **Partial Window**.
+Um nur einen Teil des Displays zu aktualisieren (z. B. eine Uhr oder einen Zähler), ohne dass das ganze Display blinkt, dient der Modus **Partial Window**.
 
-### Pasos conceptuales:
-1.  **Activar Modo Parcial**: Enviar el comando `0x91` (Partial In).
-2.  **Definir Ventana**: Enviar el comando `0x90` (Partial Window) seguido de las coordenadas:
+### Konzeptionelle Schritte:
+1.  **Teilmodus aktivieren**: Befehl `0x91` (Partial In) senden.
+2.  **Fenster definieren**: Befehl `0x90` (Partial Window) mit den Koordinaten senden:
     - `HRST` (Horizontal Start), `HRED` (Horizontal End)
     - `VRST` (Vertical Start), `VRED` (Vertical End)
-    - `PT_SCAN` (Modo de escaneo)
-3.  **Enviar Datos**: Enviar solo los bytes correspondientes a esa área usando `0x10` (o el comando de transferencia de datos).
-4.  **Refrescar**: Enviar `0x11` (Display Refresh).
-5.  **Salir del Modo Parcial**: Enviar `0x92` (Partial Out).
+    - `PT_SCAN` (Scan-Modus)
+3.  **Daten senden**: Nur die Bytes des betreffenden Bereichs über `0x10` (bzw. den Datenübertragungsbefehl) senden.
+4.  **Refreshen**: `0x11` (Display Refresh) senden.
+5.  **Teilmodus verlassen**: `0x92` (Partial Out) senden.
 
-### El problema del "Flicker"
-Por defecto, el comando `0x11` o `0x12` realiza un ciclo completo de limpieza (blanco-negro-blanco) para evitar imágenes fantasma. Para una actualización "limpia" (sin parpadeo), el controlador necesita una **LUT (Look-Up Table)** específica cargada en el registro de la pantalla. 
+### Das „Flicker"-Problem
+Standardmäßig führt `0x11`/`0x12` einen vollständigen Reinigungszyklus (Weiß-Schwarz-Weiß) durch, um Geisterbilder zu vermeiden. Für eine „saubere" Aktualisierung (ohne Blinken) braucht der Controller eine spezifische **LUT (Look-Up Table)** in seinen Registern.
 
 > [!NOTE]
-> En muchas pantallas de 3 colores (B/W/R), el refresco parcial no es posible o solo funciona en blanco y negro, ya que el pigmento rojo requiere ciclos de voltaje muy largos y agresivos que afectan a toda la superficie del panel.
+> Bei vielen 3-Farben-Displays (S/W/R) ist ein Teil-Refresh nicht oder nur in Schwarz-Weiß möglich, da das rote Pigment sehr lange, aggressive Spannungszyklen benötigt, die die gesamte Paneloberfläche betreffen.
 
-### Ejemplo de implementación (C):
+### Beispielimplementierung (C):
 ```c
 void epd_setPartialWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
     uint8_t params[9];
-    
-    // Configura coordenadas (ejemplo para UC8176)
-    params[0] = x >> 8; params[1] = x & 0xF8; // HRST (X debe ser múltiplo de 8)
+
+    // Koordinaten setzen (Beispiel für UC8176)
+    params[0] = x >> 8; params[1] = x & 0xF8; // HRST (X muss Vielfaches von 8 sein)
     params[2] = (x + w - 1) >> 8; params[3] = (x + w - 1) | 0x07; // HRED
     params[4] = y >> 8; params[5] = y & 0xFF; // VRST
     params[6] = (y + h - 1) >> 8; params[7] = (y + h - 1) & 0xFF; // VRED
     params[8] = 0x01; // PT_SCAN
-    
+
     epd_sendIndexData(0x90, params, 9);
 }
 ```

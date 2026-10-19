@@ -1,107 +1,107 @@
-# Módulo SPI Flash para CC2510
+# SPI-Flash-Modul für den CC2510
 
-Este módulo proporciona una interfaz para comunicarse con memorias Flash SPI (como la Winbond W25X10CL) utilizando el microcontrolador CC2510. Utiliza el periférico USART1 en modo SPI (Ubicación Alternativa 2).
+Dieses Modul stellt eine Schnittstelle zu SPI-Flash-Speichern (z. B. Winbond W25X10CL) über den CC2510 bereit. Es nutzt das Peripherieteil **USART1** im SPI-Modus (Alternativlage 2).
 
-## Configuración de Pines
+## Pin-Belegung
 
-El módulo asume la siguiente conexión de hardware:
+Das Modul setzt folgende Verdrahtung voraus:
 
-| Señal Flash | Pin CC2510 | Función |
-|-------------|------------|---------|
-| **CS**      | P1_4       | Chip Select (GPIO Salida) |
-| **CLK**     | P1_5       | Reloj SPI (USART1 Alt 2) |
-| **MOSI**    | P1_6       | Master Out Slave In (USART1 Alt 2) |
-| **MISO**    | P1_7       | Master In Slave Out (USART1 Alt 2) |
+| Flash-Signal | CC2510-Pin | Funktion |
+|--------------|------------|----------|
+| **CS**   | P1_4 | Chip Select (GPIO-Ausgang) |
+| **CLK**  | P1_5 | SPI-Takt (USART1 Alt 2) |
+| **MOSI** | P1_6 | Master Out Slave In (USART1 Alt 2) |
+| **MISO** | P1_7 | Master In Slave Out (USART1 Alt 2) |
 
-## Descripción de Funciones
+## Funktionsbeschreibung
 
 ### `void spi_flash_init(void)`
-Inicializa el periférico USART1 en modo SPI Master y configura los pines necesarios.
-- Configura P1_5, P1_6 y P1_7 como periféricos.
-- Configura P1_4 como salida (CS) y lo pone en estado alto (deseleccionado).
-- Establece la velocidad de baudios y el modo SPI (CPOL=0, CPHA=0).
+Initialisiert USART1 als SPI-Master und konfiguriert die nötigen Pins.
+- Setzt P1_5, P1_6 und P1_7 als Peripherie.
+- Setzt P1_4 als Ausgang (CS) und auf HIGH (abgewählt).
+- Legt Baudrate und SPI-Modus fest (CPOL=0, CPHA=0).
 
 ### `uint16_t spi_flash_read_id(void)`
-Lee el identificador del fabricante y del dispositivo.
-- **Retorna**: Un valor de 16 bits donde el byte alto es el ID del fabricante y el bajo el ID del dispositivo.
+Liest Hersteller- und Geräte-ID.
+- **Rückgabe:** 16-Bit-Wert, High-Byte = Hersteller-ID, Low-Byte = Geräte-ID.
 
 ### `void spi_flash_read(uint32_t addr, uint8_t *buf, uint16_t len)`
-Lee datos desde la memoria flash.
-- `addr`: Dirección de memoria de 24 bits desde donde empezar a leer.
-- `buf`: Puntero al buffer donde se guardarán los datos leídos.
-- `len`: Cantidad de bytes a leer.
-- **Nota**: Esta función espera a que la flash no esté ocupada antes de comenzar.
+Liest Daten aus dem Flash.
+- `addr`: 24-Bit-Startadresse.
+- `buf`: Zeiger auf den Puffer für die gelesenen Daten.
+- `len`: Anzahl zu lesender Bytes.
+- **Hinweis:** Wartet vor Beginn, bis der Flash nicht mehr beschäftigt ist.
 
 ### `void spi_flash_write(uint32_t addr, const uint8_t *buf, uint16_t len)`
-Escribe datos en la memoria flash. Realiza automáticamente la habilitación de escritura (`WRITE ENABLE`) y la programación de página (`PAGE PROGRAM`).
-- `addr`: Dirección de memoria de 24 bits donde empezar a escribir.
-- `buf`: Puntero a los datos a escribir.
-- `len`: Cantidad de bytes a escribir.
-- **Nota**: La escritura se realiza por páginas. Asegúrese de no cruzar límites de página si la memoria lo requiere, o maneje la paginación en capas superiores.
+Schreibt Daten in den Flash. Führt automatisch Write Enable und Page Program aus.
+- `addr`: 24-Bit-Startadresse.
+- `buf`: Zeiger auf die zu schreibenden Daten.
+- `len`: Anzahl zu schreibender Bytes.
+- **Hinweis:** Geschrieben wird seitenweise. Achte darauf, keine Seitengrenzen zu überschreiten, oder behandle die Paginierung in einer höheren Schicht.
 
 ### `void spi_flash_sector_erase(uint32_t addr)`
-Borra un sector de 4KB.
-- `addr`: Dirección dentro del sector que se desea borrar.
+Löscht einen 4-KB-Sektor.
+- `addr`: Adresse innerhalb des zu löschenden Sektors.
 
 ### `void spi_flash_chip_erase(void)`
-Borra todo el contenido del chip.
-- **Advertencia**: Esta operación puede tardar varios segundos.
+Löscht den gesamten Chip-Inhalt.
+- **Achtung:** Kann mehrere Sekunden dauern.
 
 ### `void spi_flash_power_down(void)`
-Pone la memoria flash en modo de bajo consumo.
+Versetzt den Flash in den Energiesparmodus.
 
 ### `void spi_flash_release_power_down(void)`
-Saca la memoria flash del modo de bajo consumo.
+Holt den Flash aus dem Energiesparmodus zurück.
 
-## Ejemplos de Uso
+## Anwendungsbeispiele
 
-### Inicialización y Verificación
+### Initialisierung und Prüfung
 
 ```c
 #include "flash/flash.h"
 
 void main(void) {
-    // Inicializar el sistema y el módulo flash
+    // System und Flash-Modul initialisieren
     spi_flash_init();
 
-    // Leer el ID para verificar comunicación
+    // ID auslesen, um die Kommunikation zu prüfen
     uint16_t flash_id = spi_flash_read_id();
-    
-    // Winbond W25X10CL debería retornar algo como 0xEF10
+
+    // Winbond W25X10CL sollte etwa 0xEF10 zurückgeben
     if (flash_id == 0xEF10) {
-        // Comunicación exitosa
+        // Kommunikation erfolgreich
     }
 }
 ```
 
-### Lectura y Escritura de Datos
+### Lesen und Schreiben
 
 ```c
-uint8_t datos_a_escribir[] = {0x10, 0x20, 0x30, 0x40};
-uint8_t buffer_lectura[4];
-uint32_t direccion = 0x000000;
+uint8_t daten[] = {0x10, 0x20, 0x30, 0x40};
+uint8_t lesepuffer[4];
+uint32_t adresse = 0x000000;
 
-// 1. Borrar el sector antes de escribir (necesario si no está vacío)
-spi_flash_sector_erase(direccion);
+// 1. Sektor vor dem Schreiben löschen (nötig, falls nicht leer)
+spi_flash_sector_erase(adresse);
 
-// 2. Escribir los datos
-spi_flash_write(direccion, datos_a_escribir, 4);
+// 2. Daten schreiben
+spi_flash_write(adresse, daten, 4);
 
-// 3. Leer los datos para verificar
-spi_flash_read(direccion, buffer_lectura, 4);
+// 3. Zur Kontrolle zurücklesen
+spi_flash_read(adresse, lesepuffer, 4);
 
-// buffer_lectura ahora debería contener {0x10, 0x20, 0x30, 0x40}
+// lesepuffer sollte jetzt {0x10, 0x20, 0x30, 0x40} enthalten
 ```
 
-### Gestión de Energía
+### Energieverwaltung
 
 ```c
-// Al terminar de usar la flash, ponerla en bajo consumo
+// Flash nach Gebrauch in den Energiesparmodus versetzen
 spi_flash_power_down();
 
-// ... tiempo después ...
+// ... später ...
 
-// Despertar la flash antes de usarla nuevamente
+// Flash vor erneuter Nutzung aufwecken
 spi_flash_release_power_down();
-// Es recomendable esperar unos microsegundos según el datasheet antes de enviar comandos
+// Laut Datenblatt vor weiteren Befehlen ein paar Mikrosekunden warten
 ```

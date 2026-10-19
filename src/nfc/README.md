@@ -1,103 +1,97 @@
-# Documentación del Módulo NFC (NT3H2111)
+# NFC-Modul (NT3H2111)
 
-Este directorio contiene los drivers para controlar el chip **NT3H2111 (NTAG I2C Plus)** utilizando el microcontrolador CC2510.
-El driver implementa un bus I2C por software (Bit-Banging) debido a la asignación de pines específica del hardware.
+Dieses Verzeichnis enthält die Treiber zur Ansteuerung des Chips **NT3H2111 (NTAG I2C Plus)** über den CC2510.
+Der Treiber implementiert einen **Software-I2C-Bus (Bit-Banging)**, bedingt durch die spezielle Pin-Belegung der Hardware.
 
-## Conexionado (Pinout)
+## Verdrahtung (Pinout)
 
-| Señal | Pin CC2510 | Notas |
-|-------|------------|-------|
-| **SDA** | P0.4       | Compartido con UART TX |
-| **SCL** | P0.6       | |
-| **VCC** | P1.0       | Alimentación conmutable (Power Pin) |
-| **FD**  | P1.1       | Field Detection (Interrupción de Campo) |
+| Signal | CC2510-Pin | Anmerkungen |
+|--------|------------|-------------|
+| **SDA** | P0.4 | geteilt mit UART TX |
+| **SCL** | P0.6 | |
+| **VCC** | P1.0 | schaltbare Versorgung (Power-Pin) |
+| **FD**  | P1.1 | Field Detection (Feld-Interrupt) |
 
-> **⚠️ Advertencia**: Dado que `P0.4` se comparte entre **NFC SDA** y **UART TX**, se debe tener cuidado de no utilizar la UART simultáneamente con el módulo NFC, o reconfigurar los pines adecuadamente antes de cada operación.
+> ⚠️ **Warnung:** Da `P0.4` zwischen **NFC SDA** und **UART TX** geteilt wird, darf die UART nicht gleichzeitig mit dem NFC-Modul genutzt werden — oder die Pins müssen vor jeder Operation passend umkonfiguriert werden.
 
 ---
 
-## 1. Driver I2C (`i2c.c` / `i2c.h`)
+## 1. I2C-Treiber (`i2c.c` / `i2c.h`)
 
-Este archivo implementa el protocolo de bajo nivel.
+Implementiert das Low-Level-Protokoll.
 
 ### `void i2c_init(void)`
-**Descripción**: Configura los pines SDA y SCL como salidas y los pone en estado inactivo (HIGH).
-- **Uso**: Llamar una vez al inicio o antes de comenzar transacciones si los pines fueron usados para otra cosa (ej. UART).
+**Beschreibung:** Konfiguriert SDA und SCL als Ausgänge und setzt sie in den Ruhezustand (HIGH).
+- **Verwendung:** Einmal am Anfang aufrufen, oder vor Transaktionen, falls die Pins zwischenzeitlich anderweitig (z. B. UART) genutzt wurden.
 
 ### `void i2c_start(void)`
-**Descripción**: Genera la condición de **START** en el bus I2C (SDA baja mientras SCL está alta).
-- **Propósito**: Iniciar una transacción.
+**Beschreibung:** Erzeugt die **START**-Bedingung (SDA fällt, während SCL HIGH ist).
+- **Zweck:** Beginn einer Transaktion.
 
 ### `void i2c_stop(void)`
-**Descripción**: Genera la condición de **STOP** en el bus I2C (SDA sube mientras SCL está alta).
-- **Propósito**: Finalizar una transacción y liberar el bus.
+**Beschreibung:** Erzeugt die **STOP**-Bedingung (SDA steigt, während SCL HIGH ist).
+- **Zweck:** Transaktion beenden und Bus freigeben.
 
 ### `bool i2c_write_byte(uint8_t byte)`
-**Descripción**: Envía un byte (8 bits) por el bus.
-- **Parámetros**:
-    - `byte`: El dato a enviar.
-- **Retorno**: `true` si el esclavo respondió con **ACK** (se recibió el dato correctamente), `false` si hubo **NACK**.
+**Beschreibung:** Sendet ein Byte (8 Bit) über den Bus.
+- **Parameter:** `byte` — zu sendendes Datum.
+- **Rückgabe:** `true` bei **ACK** (Datum korrekt empfangen), `false` bei **NACK**.
 
 ### `uint8_t i2c_read_byte(bool ack)`
-**Descripción**: Lee un byte del bus I2C.
-- **Parámetros**:
-    - `ack`: `true` para enviar ACK al final (indica que queremos leer más bytes), `false` para enviar NACK (indica que es el último byte).
-- **Retorno**: El byte leído.
+**Beschreibung:** Liest ein Byte vom I2C-Bus.
+- **Parameter:** `ack` — `true` sendet am Ende ein ACK (weitere Bytes gewünscht), `false` ein NACK (letztes Byte).
+- **Rückgabe:** das gelesene Byte.
 
 ---
 
-## 2. Driver NFC (`nfc.c` / `nfc.h`)
+## 2. NFC-Treiber (`nfc.c` / `nfc.h`)
 
-Este archivo implementa las funciones de alto nivel para el chip NT3H2111.
+Implementiert die High-Level-Funktionen für den NT3H2111.
 
 ### `void nfc_init(void)`
-**Descripción**: 
-1. Activa la alimentación del chip NFC poniendo `P1.0` en HIGH.
-2. Espera unos milisegundos para que el chip arranque.
-3. Inicializa el bus I2C llamando a `i2c_init()`.
-- **Uso**: Obligatorio llamar antes de cualquier operación NFC.
+**Beschreibung:**
+1. Aktiviert die Versorgung des NFC-Chips (`P1.0` auf HIGH).
+2. Wartet einige Millisekunden, bis der Chip hochfährt.
+3. Initialisiert den I2C-Bus über `i2c_init()`.
+- **Verwendung:** Vor jeder NFC-Operation zwingend aufrufen.
 
 ### `bool nfc_read_page(uint8_t page, uint8_t *buffer)`
-**Descripción**: Lee una página completa (16 bytes) del tag NFC.
-- **Parámetros**:
-    - `page`: Dirección de la página a leer (0x00 a 0xE2 aprox).
-    - `buffer`: Puntero a un array de al menos 16 bytes donde se guardarán los datos.
-- **Retorno**: `true` si la lectura fue exitosa (ACK recibido), `false` en caso de error.
-- **Ejemplo**:
+**Beschreibung:** Liest eine komplette Seite (16 Byte) vom NFC-Tag.
+- **Parameter:** `page` — Seitenadresse (ca. 0x00 bis 0xE2); `buffer` — Zeiger auf ein Array von mindestens 16 Byte.
+- **Rückgabe:** `true` bei Erfolg (ACK), `false` bei Fehler.
+- **Beispiel:**
 ```c
 uint8_t data[16];
 if (nfc_read_page(0, data)) {
-    // data contiene los primeros 16 bytes de la memoria
+    // data enthält die ersten 16 Byte des Speichers
 }
 ```
 
 ### `bool nfc_write_page(uint8_t page, uint8_t *data)`
-**Descripción**: Escribe una página completa (16 bytes) en el tag NFC.
-- **Parámetros**:
-    - `page`: Dirección de la página a escribir.
-    - `data`: Puntero a un array de 16 bytes con los datos a escribir.
-- **Retorno**: `true` si la escritura fue recibida correctamente.
-- **Nota**: La función incluye un retardo (`delay_ms(10)`) al final para dar tiempo al chip a grabar los datos en su memoria EEPROM interna.
+**Beschreibung:** Schreibt eine komplette Seite (16 Byte) auf den NFC-Tag.
+- **Parameter:** `page` — Seitenadresse; `data` — Zeiger auf ein 16-Byte-Array.
+- **Rückgabe:** `true`, wenn der Schreibvorgang korrekt bestätigt wurde.
+- **Hinweis:** Enthält am Ende eine Verzögerung (`delay_ms(10)`), damit der Chip Zeit hat, die Daten in sein internes EEPROM zu schreiben.
 
 ### `bool nfc_erase_all(void)`
-**Descripción**: Realiza un borrado completo ("Factory Reset") del chip.
-1. Escribe `0x00` en el registro de configuración (Página `0x3A`) para eliminar protecciones/passwords.
-2. Escribe `0x00` en todas las páginas de memoria de usuario (Páginas 4 a `0x39`).
-- **Retorno**: `true` si todo fue exitoso.
-- **Tiempo de ejecución**: Aprox 2.2s.
+**Beschreibung:** Führt ein komplettes Löschen („Factory Reset") durch.
+1. Schreibt `0x00` ins Konfigurationsregister (Seite `0x3A`), um Schutz/Passwörter zu entfernen.
+2. Schreibt `0x00` in alle User-Speicherseiten (Seiten 4 bis `0x39`).
+- **Rückgabe:** `true` bei Erfolg.
+- **Laufzeit:** ca. 2,2 s.
 
 ### `bool nfc_read_session_reg(uint8_t *reg_val)`
-**Descripción**: Función placeholder para leer registros de sesión (configuración). Actualmente no implementada completamente.
-- **Retorno**: `false`.
+**Beschreibung:** Platzhalter zum Lesen der Session-Register (Konfiguration). Aktuell nicht vollständig implementiert.
+- **Rückgabe:** `false`.
 
 ---
 
-## Dirección I2C
-El driver usa la dirección I2C por defecto de la familia NTAG I2C:
-- **Escritura**: `0xAA` (0x55 << 1)
-- **Lectura**: `0xAB` ((0x55 << 1) | 1)
+## I2C-Adresse
+Der Treiber nutzt die Standard-I2C-Adresse der NTAG-I2C-Familie:
+- **Schreiben:** `0xAA` (0x55 << 1)
+- **Lesen:** `0xAB` ((0x55 << 1) | 1)
 
-## Recomendaciones de Uso
-1. **Inicialización**: Siempre llamar a `nfc_init()` primero.
-2. **Watchdog**: Las operaciones de escritura tienen retardos (10ms). Si usas el Watchdog Timer (WDT), asegúrate de "alimentarlo" si vas a escribir muchas páginas seguidas en un bucle.
-3. **Conflictos**: Recuerda deshabilitar la UART si la estabas usando antes de llamar a estas funciones.
+## Nutzungshinweise
+1. **Initialisierung:** Immer zuerst `nfc_init()` aufrufen.
+2. **Watchdog:** Schreiboperationen enthalten Verzögerungen (10 ms). Beim Beschreiben vieler Seiten in einer Schleife den Watchdog Timer (WDT) ggf. „füttern".
+3. **Konflikte:** Vor diesen Funktionen die UART deaktivieren, falls sie zuvor genutzt wurde.

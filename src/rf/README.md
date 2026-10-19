@@ -1,66 +1,65 @@
-# Módulo de Radiofrecuencia (RF) para CC2510
+# Funkmodul (RF) für den CC2510
 
-Este módulo implementa una comunicación inalámbrica básica utilizando el transceptor de 2.4GHz integrado en el CC2510.
+Dieses Modul implementiert eine grundlegende drahtlose Kommunikation über den im CC2510 integrierten 2,4-GHz-Transceiver.
 
-## Configuración
-El módulo está configurado con los siguientes parámetros por defecto:
-- **Frecuencia:** 2433 MHz
-- **Velocidad de Datos:** 250 kBaud
-- **Modulación:** MSK
-- **Potencia de Salida:** 0 dBm
+## Konfiguration
+Standardparameter des Moduls:
+- **Frequenz:** 2433 MHz
+- **Datenrate:** 250 kBaud
+- **Modulation:** MSK
+- **Sendeleistung:** 0 dBm
 
-## Archivos
-- `rf.h`: Archivo de cabecera con los prototipos de funciones y definiciones.
-- `rf.c`: Implementación de las funciones de inicialización, envío y recepción.
+## Dateien
+- `rf.h`: Header mit Funktionsprototypen und Definitionen.
+- `rf.c`: Implementierung von Initialisierung, Senden und Empfangen.
 
-## Cómo Usar
+## Verwendung
 
-### 1. Inicialización
-Antes de usar cualquier función de RF, debes inicializar el módulo llamando a `rf_init()`. Esto configura los registros del radio con los valores necesarios.
+### 1. Initialisierung
+Vor jeder RF-Funktion muss das Modul mit `rf_init()` initialisiert werden. Das setzt die Radio-Register auf die nötigen Werte.
 
 ```c
 #include "rf/rf.h"
 
 void main(void) {
-    // ... otras inicializaciones ...
+    // ... andere Initialisierungen ...
     rf_init();
     // ...
 }
 ```
 
-### 2. Enviar Paquetes
-Para enviar datos, utiliza la función `rf_send_packet`. Esta función es bloqueante y esperará hasta que el paquete se haya transmitido.
+### 2. Pakete senden
+Zum Senden dient `rf_send_packet`. Die Funktion ist blockierend und wartet, bis das Paket übertragen wurde.
 
 ```c
-uint8_t datos[] = "Hola Mundo";
-rf_send_packet(datos, sizeof(datos) - 1); // Enviar sin el caracter nulo
+uint8_t daten[] = "Hallo Welt";
+rf_send_packet(daten, sizeof(daten) - 1); // ohne das Nullbyte senden
 ```
 
-
-### 3. Recibir Paquetes
-Para recibir datos, utiliza `rf_receive_packet`. Esta función verifica si ha llegado un paquete completo.
+### 3. Pakete empfangen
+Zum Empfangen dient `rf_receive_packet`. Die Funktion prüft, ob ein vollständiges Paket eingetroffen ist.
 
 ```c
 uint8_t buffer[32];
-uint8_t longitud = rf_receive_packet(buffer, 32);
+uint8_t laenge = rf_receive_packet(buffer, 32);
 
-if (longitud > 0) {
-    // Se recibió un paquete
-    // 'buffer' contiene los datos
-    // 'longitud' es el tamaño de los datos recibidos
+if (laenge > 0) {
+    // Ein Paket wurde empfangen
+    // 'buffer' enthält die Daten
+    // 'laenge' ist die Größe der empfangenen Daten
 }
 ```
 
-**Funcionamiento interno:**
-1.  Verifica si el radio está en modo RX. Si no, lo pone en modo RX (`SRX`).
-2.  Verifica la bandera de interrupción `IRQ_DONE` en el registro `RFIF` (bit 4), que indica que se ha completado una operación (en este caso, recepción).
-3.  Si hay un paquete:
-    -   Lee la longitud del primer byte.
-    -   Si la longitud es válida, lee el resto de los datos del registro `RFD`.
-    -   Lee (y descarta por ahora) los bytes de estado (RSSI y LQI) que el hardware añade automáticamente.
-    -   Devuelve la longitud de los datos útiles.
-4.  Si la longitud es excesiva, limpia el FIFO de RX (`SFRX`) y reinicia la recepción.
+**Interner Ablauf:**
+1.  Prüft, ob das Radio im RX-Modus ist. Falls nicht, wird RX aktiviert (`SRX`).
+2.  Prüft das Interrupt-Flag `IRQ_DONE` im Register `RFIF` (Bit 4), das den Abschluss einer Operation (hier: Empfang) anzeigt.
+3.  Wenn ein Paket vorliegt:
+    -   liest die Länge aus dem ersten Byte,
+    -   liest bei gültiger Länge die restlichen Daten aus dem Register `RFD`,
+    -   liest (und verwirft vorerst) die Status-Bytes (RSSI und LQI), die die Hardware automatisch anhängt,
+    -   gibt die Länge der Nutzdaten zurück.
+4.  Bei zu großer Länge wird der RX-FIFO geleert (`SFRX`) und der Empfang neu gestartet.
 
-## Notas
-- La función de recepción está diseñada para ser llamada periódicamente (polling) dentro del bucle principal.
-- Asegúrate de que `HAL_ENABLE_INTERRUPTS()` esté activo si decides usar interrupciones en el futuro, aunque esta implementación básica funciona por polling de banderas.
+## Hinweise
+- Die Empfangsfunktion ist für periodisches Aufrufen (Polling) in der Hauptschleife gedacht.
+- Stelle sicher, dass `HAL_ENABLE_INTERRUPTS()` aktiv ist, falls du künftig Interrupts nutzen willst — diese einfache Implementierung arbeitet aber per Flag-Polling.
