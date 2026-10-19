@@ -1,6 +1,6 @@
 # CC2510-ESL — Firmware für elektronische Preisschilder
 
-> **ℹ️ Fork-Hinweis:** Dies ist **nicht meine eigene Arbeit**, sondern ein **Fork des ursprünglich von [Loryuwu](https://github.com/Loryuwu) entwickelten Projekts**, das ich für meine eigenen Bedürfnisse **erweitere** — Ziel: die Tags als Display für **Home Assistant** (Wetter & Haus-Infos) über Funk zu nutzen. Die ursprüngliche Firmware stammt von Loryuwu und basiert ihrerseits auf der Arbeit von [@andrei-tatar](https://github.com/andrei-tatar/imagotag-hack). Alle Credits siehe [unten](#-credits).
+> **ℹ️ Fork-Hinweis:** Dies ist **nicht meine eigene Arbeit**, sondern ein **Fork von [Loryuwu/CC2510-ESL](https://github.com/Loryuwu/CC2510-ESL)**, das ich für meine eigenen Bedürfnisse **erweitere** — Ziel: die Tags als Display für **Home Assistant** (Wetter & Haus-Infos) über Funk zu nutzen. Die ursprüngliche Firmware stammt von Loryuwu und basiert ihrerseits auf der Arbeit von [@andrei-tatar](https://github.com/andrei-tatar/imagotag-hack). Alle Credits siehe [unten](#-credits).
 >
 > 🇪🇸 Spanische Originalversion des READMEs: [README.es.md](./README.es.md)
 
@@ -181,6 +181,6 @@ Dieses Projekt entsteht als Hobby — Elektronik aus Leidenschaft, ohne formale 
 
 ## 🙏 Credits
 
-- **[Loryuwu](https://github.com/Loryuwu)** — ursprünglicher Autor dieser CC2510-ESL-Firmware. Der Großteil des Codes und der Dokumentation stammt von ihm; dieses Repo ist nur ein Fork, den ich erweitere.
+- **[Loryuwu](https://github.com/Loryuwu)** — ursprünglicher Autor dieser Firmware. Der Großteil des Codes und der Dokumentation stammt von ihm; dieses Repo ist nur ein Fork von **[Loryuwu/CC2510-ESL](https://github.com/Loryuwu/CC2510-ESL)**, den ich erweitere. (Loryuwu hat außerdem passende Repos für die Gegenseite: eine ESP32-Firmware und eine Desktop-App zum Bild-Senden.)
 - **[@andrei-tatar](https://github.com/andrei-tatar/imagotag-hack)** — Grundlage, auf der Loryuwus Firmware aufbaut. Vielen Dank für die enorme Vorarbeit.
 - **[@jirkabalhar](https://blog.jirkabalhar.cz/2023/12/hacking-sesimagotag-e-ink-price-tag)** — Blog über das Ansteuern des reinen Screens eines SES-imagotag-Tags.
