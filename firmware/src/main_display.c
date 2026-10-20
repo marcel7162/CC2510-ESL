@@ -72,8 +72,9 @@ static void led_init(void) {
 /* Pull model: the tag sleeps, wakes every POLL_SECONDS, polls the gateway and
  * takes an image if one is offered, then sleeps again. The e-ink holds its
  * picture with zero power, so the tag is off ~99% of the time. */
-#define POLL_SECONDS    300        /* 5 min between polls */
+#define POLL_SECONDS    300        /* default 5 min; overridable by the gateway */
 #define POLL_MISS_LIMIT 4          /* silent polls before we try re-enrolling */
+#define HOME_CHANNEL    76         /* 2476 MHz: fixed rendezvous + fallback ch */
 
 /* poll_once() outcomes */
 #define POLL_SILENT  0             /* gateway did not answer at all */
@@ -95,6 +96,21 @@ static __xdata char line_status[24];
  * frame (-> snow). We process each seq exactly once and just re-ACK repeats. */
 static __xdata uint8_t last_rx_seq;
 static __xdata uint8_t seq_valid;
+
+/* Host-controlled config, carried in the gateway's poll replies (NOUPDATE /
+ * IMG_SHOW). Defaults = the old hard-coded behaviour, so an un-upgraded or
+ * silent gateway changes nothing. g_next_channel is applied just before sleep
+ * so the next poll lands on it; the gateway switches at the same moment. */
+static __xdata uint16_t g_poll_secs   = POLL_SECONDS;
+static __xdata uint8_t  g_cur_channel = HOME_CHANNEL;
+static __xdata uint8_t  g_next_channel = HOME_CHANNEL;
+
+/* sleep = [hi][lo] seconds (clamped sane), ch = nRF24 channel (1..125). */
+static void apply_cfg(uint8_t sh, uint8_t sl, uint8_t ch) {
+    uint16_t s = ((uint16_t)sh << 8) | sl;
+    if (s >= 10 && s <= 65000) g_poll_secs = s;
+    if (ch >= 1 && ch <= 125)  g_next_channel = ch;
+}
 
 static const __code char HEX[] = "0123456789ABCDEF";
 
@@ -309,6 +325,8 @@ static uint8_t handle_img(uint8_t len) {
             last_rx_seq = seq; seq_valid = 1;
         }
         send_ack(0, seq);
+        /* IMG_SHOW may carry [seq][sleep_hi][sleep_lo][channel] for next cycle */
+        if (len >= 5) apply_cfg(rxb[2], rxb[3], rxb[4]);
         return 1;
     }
     return 0;
@@ -349,8 +367,11 @@ static uint8_t poll_once(void) {
         if (radio_rx(rxb, &len, 2000)) {
             stalls = 0;
             if (len >= 1) {
-                if (rxb[0] == CMD_NOUPDATE)
+                if (rxb[0] == CMD_NOUPDATE) {
+                    /* NOUPDATE may carry [sleep_hi][sleep_lo][channel] */
+                    if (len >= 4) apply_cfg(rxb[1], rxb[2], rxb[3]);
                     return POLL_NONE;
+                }
                 if (handle_img(len))       /* 1 on SHOW -> stream complete */
                     return POLL_UPDATED;
             }
@@ -392,20 +413,31 @@ void main(void) {
     show("Verbinde...");
 
     for (;;) {
+        /* Enrollment + recovery always happen on the fixed home channel - the
+         * invariant rendezvous. A failed channel switch (tag or gateway lost the
+         * command) ends here, and both sides meet again on home. */
+        g_cur_channel = HOME_CHANNEL; g_next_channel = HOME_CHANNEL;
+        radio_set_channel(HOME_CHANNEL);
         do_enroll();            /* get our address (silent on the happy path) */
 
         /* Pull loop: poll, take an image if offered, then deep-sleep. The tag
-         * is off ~99% of the time; the e-ink holds the picture meanwhile. */
+         * is off ~99% of the time; the e-ink holds the picture meanwhile. Sleep
+         * length and channel come from the gateway's replies (apply_cfg). */
         misses = 0;
         for (;;) {
             if (poll_once() == POLL_SILENT) {
                 if (++misses >= POLL_MISS_LIMIT)
-                    break;      /* gateway gone / lost us -> try re-enrolling */
+                    break;      /* gateway gone / lost us -> re-enroll on home */
             } else {
                 misses = 0;
             }
+            /* Adopt a gateway-commanded channel change for the next cycle. */
+            if (g_next_channel != g_cur_channel) {
+                radio_set_channel(g_next_channel);
+                g_cur_channel = g_next_channel;
+            }
             radio_sleep();      /* radio off before sleeping */
-            cc_sleep(POLL_SECONDS);
+            cc_sleep(g_poll_secs);
             radio_wake();       /* crystal + radio back up (config retained) */
         }
     }

@@ -9,6 +9,10 @@
 
 void radio_init(uint8_t addr);
 void radio_set_addr(uint8_t addr);   /* change the protocol address at runtime */
+/* Retune to nRF24 channel `ch` (carrier = 2400+ch MHz) at runtime, e.g. to
+ * dodge WiFi. ch 76 = 2476 MHz = the compiled home channel. Auto-cal on the
+ * next RX/TX strobe picks up the new frequency. */
+void radio_set_channel(uint8_t ch);
 uint8_t radio_tx(const uint8_t *buf, uint8_t len);
 uint8_t radio_rx(uint8_t *buf, uint8_t *len, uint16_t timeout_ms);
 

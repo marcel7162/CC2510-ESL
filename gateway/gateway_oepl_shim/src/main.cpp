@@ -22,6 +22,7 @@
 #include <RF24.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <time.h>
 #include <ESPAsyncWebServer.h>
 #include <TJpg_Decoder.h>
@@ -29,6 +30,18 @@
 
 // ===================== CONFIG =====================
 #define TZ_STRING "CET-1CEST,M3.5.0,M10.5.0/3"
+
+// Feste IP: HA muss den AP immer unter derselben Adresse erreichen. Ohne das
+// bekam der ESP bei jedem WLAN-Aus/An (waehrend eines Streams) per DHCP eine
+// neue IP -> HA verlor den AP. An DEIN Netz anpassen (Gateway/Subnetz)!
+#define USE_STATIC_IP 0
+IPAddress STATIC_IP (192,168,137,174);
+IPAddress STATIC_GW (192,168,137,1);
+IPAddress STATIC_SN (255,255,255,0);
+IPAddress STATIC_DNS(192,168,137,1);
+// Zusaetzlich per mDNS erreichbar: http://pricetag-ap.local (falls dein Netz
+// mDNS routet - dann ist HA sogar IP-unabhaengig).
+#define MDNS_NAME "pricetag-ap"
 // OEPL-Hardwaretyp 0x56 = "HS BWR 2.66"" 296x152 schwarz/weiss/rot -> exakter
 // Match fuer das IL0373-E2266-Panel. HA rendert damit nativ in 296x152.
 #define HW_TYPE 0x56
@@ -87,6 +100,13 @@ uint16_t streamReTx = 0;
 uint8_t txSeq = 0;
 uint8_t lastRssi = 0, lastLqi = 0, lastFreq = 0;
 
+// --- Host-steuerbare Konfig; der Tag erhaelt sie in jeder Poll-Antwort ---
+#define HOME_CHANNEL 76                    // 2476 MHz: Rendezvous + Fallback
+uint16_t g_pollInterval     = 300;         // Sekunden bis zum naechsten Poll
+uint8_t  g_operatingChannel = HOME_CHANNEL;// Kanal, auf dem das Gateway IST
+uint8_t  g_advertChannel    = HOME_CHANNEL;// Kanal, den wir dem Tag ansagen
+uint32_t g_lastTagContact   = 0;           // fuer den Home-Fallback
+
 #define MAX_PENDING 8
 struct Pend { uint8_t uid[7]; uint8_t label[4]; };
 Pend pend[MAX_PENDING]; uint8_t pendCount = 0;
@@ -121,6 +141,9 @@ String tagMacStr(uint8_t idx);
 int findByMac(const String &mac);
 bool jpgOutput(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bmp);
 void startServer();
+void maybeSwitchChannel();
+int  scanChannel(uint8_t ch, int samples);
+uint8_t scanBestChannel(String *report);
 String buildTagJson(uint8_t idx);
 void wsPushTag(uint8_t idx);
 void wsPushSys();
@@ -213,7 +236,8 @@ bool streamImage(uint8_t addr) {
     }
 
     s = ++txSeq; d[0]=CMD_IMG_SHOW; d[1]=s;
-    bool ok = sendReliable(addr, d, 2, 60000, 3, s);
+    d[2]=(uint8_t)(g_pollInterval>>8); d[3]=(uint8_t)g_pollInterval; d[4]=g_advertChannel;
+    bool ok = sendReliable(addr, d, 5, 60000, 3, s);   // + sleep(2) + channel(1)
     Serial.printf("  stream %d RLE-Bytes in %d Paketen, %d ReTx, refresh %s\n",
                   total, sent, streamReTx, ok?"OK":"FAIL");
     return ok;
@@ -223,7 +247,8 @@ bool streamImage(uint8_t addr) {
 // werte im Wetter-Gateway). Danach Reconnect im Hintergrund.
 void sendFrame(uint8_t idx){
     bool wasOn = (WiFi.getMode()!=WIFI_OFF);
-    if(wasOn){ WiFi.disconnect(true,true); WiFi.mode(WIFI_OFF); delay(30); }
+    // Nur deauth, Zugangsdaten/feste IP NICHT loeschen -> schneller, gleicher IP.
+    if(wasOn){ WiFi.disconnect(true,false); WiFi.mode(WIFI_OFF); delay(30); }
     Serial.printf("[%lu] stream -> 0x%02X (WLAN aus fuer Stream)\n", millis(), reg[idx].addr);
     bool ok = streamImage(reg[idx].addr);
     lastFrame[idx]=millis();
@@ -296,11 +321,11 @@ String buildTagJson(uint8_t idx){
     s += "\"batteryMv\":2800,";
     s += "\"temperature\":20,";
     s += "\"lastseen\":" + String((uint32_t)(online[idx]?now:0)) + ",";
-    s += "\"nextcheckin\":" + String((uint32_t)(now+300)) + ",";
+    s += "\"nextcheckin\":" + String((uint32_t)(now+g_pollInterval)) + ",";
     s += "\"contentMode\":0,";
     s += "\"pending\":" + String(g_imgPending && g_imgAddr==reg[idx].addr ? "true":"false") + ",";
     s += "\"hash\":\"0\",";
-    s += "\"rotate\":0,\"lut\":0,\"ch\":" + String(NRF_CHANNEL) + ",";
+    s += "\"rotate\":0,\"lut\":0,\"ch\":" + String(g_operatingChannel) + ",";
     s += "\"ver\":1,\"capabilities\":0,\"isexternal\":false,";
     s += "\"wakeupReason\":1,\"updatecount\":" + String(updateCount[idx]);
     s += "}";
@@ -334,8 +359,65 @@ void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *c, AwsEventType type,
     }
 }
 
+// --- Kanal-Agilitaet: Wechsel + Scan ---
+// Nach dem Beantworten eines Polls selbst auf den angesagten Kanal wechseln.
+// Reihenfolge wichtig: erst dem Tag ansagen, DANN selbst umschalten - der Tag
+// kommt beim naechsten Poll dort an. Verpasst er die Ansage, faellt er (und
+// via Timeout auch wir) auf Home zurueck.
+void maybeSwitchChannel(){
+    if(g_advertChannel==g_operatingChannel) return;
+    Serial.printf("[ch] wechsle ch%u -> ch%u (Tag angesagt)\n", g_operatingChannel, g_advertChannel);
+    g_operatingChannel=g_advertChannel;
+    radio.setChannel(g_operatingChannel); modeRx();
+}
+// Laerm auf einem Kanal messen: RX, RPD (Received Power Detector, >-64dBm)
+// mehrfach abtasten; mehr Treffer = mehr Stoerung.
+int scanChannel(uint8_t ch, int samples){
+    radio.setChannel(ch);
+    int hits=0;
+    for(int i=0;i<samples;i++){
+        radio.startListening();
+        delayMicroseconds(200);
+        if(radio.testRPD()) hits++;
+        radio.stopListening();
+    }
+    return hits;
+}
+// Ruhigsten Kanal im Raster 2..82 finden (oberhalb 82 = ausserhalb ISM).
+uint8_t scanBestChannel(String *report){
+    uint8_t best=HOME_CHANNEL; int bestHits=1000000;
+    for(uint8_t ch=2; ch<=82; ch+=2){
+        int h=scanChannel(ch,128);
+        if(report) *report += String(ch)+":"+String(h)+" ";
+        if(h<bestHits){ bestHits=h; best=ch; }
+    }
+    radio.setChannel(g_operatingChannel); modeRx();   // Normalbetrieb wiederherstellen
+    return best;
+}
+
 void startServer(){
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *r){ r->send(200,"text/plain","OpenEPaperLink"); });
+
+    // Host-Konfig: ?poll=<sek>&ch=<1..125> (beide optional). Der Tag uebernimmt
+    // die Werte bei seiner naechsten Poll-Antwort.
+    server.on("/config", HTTP_GET, [](AsyncWebServerRequest *r){
+        if(r->hasParam("poll")){ long v=r->getParam("poll")->value().toInt(); if(v>=10&&v<=65000) g_pollInterval=(uint16_t)v; }
+        if(r->hasParam("ch")){ long c=r->getParam("ch")->value().toInt(); if(c>=1&&c<=125) g_advertChannel=(uint8_t)c; }
+        String s="{\"poll\":"+String(g_pollInterval)+",\"operatingChannel\":"+String(g_operatingChannel)
+                 +",\"advertChannel\":"+String(g_advertChannel)+"}";
+        r->send(200,"application/json",s);
+    });
+
+    // Funk-Scan: misst alle Kanaele, meldet den ruhigsten. ?apply=1 uebernimmt
+    // ihn direkt (wird dem Tag dann angesagt). Blockiert ~1-2 s.
+    server.on("/scan", HTTP_GET, [](AsyncWebServerRequest *r){
+        String rep; uint8_t best=scanBestChannel(&rep);
+        bool apply = r->hasParam("apply") && r->getParam("apply")->value()=="1";
+        if(apply) g_advertChannel=best;
+        String s="{\"best\":"+String(best)+",\"applied\":"+String(apply?"true":"false")
+                 +",\"hits\":\""+rep+"\"}";
+        r->send(200,"application/json",s);
+    });
 
     server.on("/sysinfo", HTTP_GET, [](AsyncWebServerRequest *r){
         String s = "{\"env\":\"PriceTag_CC2510_Shim\",\"alias\":\"PriceTag-Shim\",";
@@ -392,10 +474,16 @@ void setup(){
     for(uint8_t i=0;i<regCount;i++)
         Serial.printf("  0x%02X  mac=%s  label=%s\n", reg[i].addr, tagMacStr(i).c_str(), hexBytes(reg[i].label,4,0).c_str());
 
-    WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID,WIFI_PASS); Serial.print("WiFi");
+    WiFi.mode(WIFI_STA);
+#if USE_STATIC_IP
+    if(!WiFi.config(STATIC_IP, STATIC_GW, STATIC_SN, STATIC_DNS))
+        Serial.println("WARN: WiFi.config (feste IP) fehlgeschlagen");
+#endif
+    WiFi.begin(WIFI_SSID,WIFI_PASS); Serial.print("WiFi");
     for(int i=0;i<40 && WiFi.status()!=WL_CONNECTED;i++){ delay(250); Serial.print("."); }
     if(WiFi.status()==WL_CONNECTED){
-        Serial.printf(" ok  IP=%s\n", WiFi.localIP().toString().c_str());
+        Serial.printf(" ok  IP=%s  (http://%s.local)\n", WiFi.localIP().toString().c_str(), MDNS_NAME);
+        if(MDNS.begin(MDNS_NAME)) MDNS.addService("http","tcp",80);
         configTzTime(TZ_STRING,"pool.ntp.org","time.google.com");
     } else {
         Serial.println(" FEHLT (HA-Anbindung erst nach WLAN moeglich)");
@@ -403,7 +491,7 @@ void setup(){
 
     SPI.begin(3,9,7,CSN_PIN);
     if(!radio.begin(&SPI)){ Serial.println("ERROR nRF24"); while(1) delay(1000); }
-    radio.setChannel(NRF_CHANNEL); radio.setDataRate(RF24_250KBPS); radio.setPALevel(RF24_PA_MAX);
+    radio.setChannel(g_operatingChannel); radio.setDataRate(RF24_250KBPS); radio.setPALevel(RF24_PA_MAX);
     radio.setPayloadSize(NRF_PAYLOAD_SIZE); radio.setAutoAck(false); radio.setRetries(0,0);
     radio.disableDynamicPayloads(); radio.disableCRC(); modeRx();
 
@@ -423,6 +511,7 @@ void loop(){
     if(radio.available()){ uint8_t raw[NRF_PAYLOAD_SIZE]; radio.read(raw,sizeof(raw)); uint8_t len=raw[1];
         if(len>=1 && (uint8_t)(len+3)<=NRF_PAYLOAD_SIZE && crc8(raw,len+2)==raw[len+2]){
             uint8_t cmd=raw[2];
+            g_lastTagContact=millis();
             if(cmd==CMD_ENROLL_REQ && len>=12){ handleReq(&raw[3],&raw[10]); }
             else if(cmd==CMD_POLL){
                 uint8_t src=raw[0]; int idx=findAddr(src);
@@ -431,14 +520,27 @@ void loop(){
                     if(g_imgPending && g_imgAddr==src){
                         Serial.printf("[%lu] poll 0x%02X -> stream (Bild von HA)\n", millis(), src);
                         g_imgPending=false;
-                        sendFrame(idx);
+                        sendFrame(idx);                 // IMG_SHOW traegt sleep+channel
                         wsPushTag(idx);
                     } else {
-                        uint8_t d[1]={CMD_NOUPDATE}; sendCmd(src,d,1);
-                        Serial.printf("[%lu] poll 0x%02X -> nix (kein neues Bild)\n", millis(), src);
+                        // NOUPDATE traegt [sleep_hi][sleep_lo][channel]
+                        uint8_t d[4]={CMD_NOUPDATE,(uint8_t)(g_pollInterval>>8),(uint8_t)g_pollInterval,g_advertChannel};
+                        sendCmd(src,d,4);
+                        Serial.printf("[%lu] poll 0x%02X -> nix (poll=%us ch=%u)\n", millis(), src, g_pollInterval, g_advertChannel);
                     }
+                    maybeSwitchChannel();   // nach der Antwort ggf. selbst auf den neuen Kanal
                 }
             }
         }
+    }
+
+    // Home-Fallback: hoeren wir lange nichts (3x Poll-Intervall) und sind nicht
+    // auf Home, ist der Tag wohl auf Home zurueckgefallen -> wir folgen.
+    if(g_operatingChannel!=HOME_CHANNEL && g_lastTagContact &&
+       millis()-g_lastTagContact > (uint32_t)g_pollInterval*3000UL){
+        Serial.printf("[ch] lange kein Tag auf ch%u -> zurueck auf Home ch%u\n", g_operatingChannel, HOME_CHANNEL);
+        g_advertChannel=HOME_CHANNEL; g_operatingChannel=HOME_CHANNEL;
+        radio.setChannel(HOME_CHANNEL); modeRx();
+        g_lastTagContact=millis();
     }
 }

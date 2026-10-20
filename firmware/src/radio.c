@@ -156,6 +156,24 @@ void radio_set_addr(uint8_t addr) {
     my_addr = addr;
 }
 
+/*
+ * Retune at runtime to nRF24 channel `ch` (carrier 2400+ch MHz).
+ *   FREQ = f_carrier * 2^16 / f_xosc,  f_xosc = 26 MHz
+ * (+13 for rounding). ch 76 reproduces ~2476 MHz (the compiled home channel,
+ * within a few LSB of radio_init's value - the AFC absorbs the <2 kHz diff).
+ * Must be in IDLE to change the synthesizer; MCSM0 auto-cal re-calibrates on
+ * the next RX/TX strobe.
+ */
+void radio_set_channel(uint8_t ch) {
+    uint32_t f = ((uint32_t)(2400U + ch) * 65536UL + 13UL) / 26UL;
+    if (!radio_ready) return;
+    RFST = STROBE_IDLE;
+    wait_idle();
+    FREQ2 = (uint8_t)(f >> 16);
+    FREQ1 = (uint8_t)(f >> 8);
+    FREQ0 = (uint8_t)(f);
+}
+
 static __xdata uint8_t tx_ota[OTA_SIZE];
 static __xdata uint8_t tx_proto[RADIO_MAX_PAYLOAD + 4];
 
