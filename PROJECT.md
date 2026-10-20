@@ -11,6 +11,55 @@ als Home Assistant Display nutzen: Wetter, Energie, Status.
 Home Assistant ──MQTT──▶ ESP32-S3 Gateway ──nRF24 (250kbps, ch76)──▶ CC2510 ──SPI──▶ E-Ink (296x152, 3 Farben)
 ```
 
+## Stand 2026-10-20: PlatformIO, HA-Anbindung über OEPL-Shim, dynamische Konfig
+
+Aktueller, lauffähiger Stand nach der HA-Integration. Die drei Gateway-Builds
+liegen in `gateway/`, jeweils als PlatformIO-Projekt (pioarduino-Core
+arduino-esp32 3.x / IDF 5.x — der alte, eingefrorene PlatformIO-Core brachte das
+WLAN-PHY auf dem ESP32-S3 nicht hoch). Zugangsdaten jeweils in lokaler,
+git-ignorierter `credentials.h` (Vorlage: `credentials.h.example`).
+
+**Entscheidende Funk-Erkenntnis:** Das ESP-WLAN stört den direkt benachbarten
+nRF24 massiv. Auf 2 m gemessen: WLAN an = RSSI −75 dBm / 67 % Retransmits /
+Stream FAIL; WLAN aus = −53 dBm / 15 % / OK. Lösung: Das Gateway schaltet das
+WLAN **nur für die Dauer eines Bild-Streams** ab und danach wieder an — Wetter-
+Abruf braucht WLAN, der Stream nicht. Es ist **kein** Reichweiten-/Antennen-,
+sondern ein Koexistenz-Problem (beide Chips sind reine 2,4-GHz-Hardware).
+
+### `gateway/gateway_weather_pio/` — eigenständiges Wetter-Gateway
+Holt Wetter selbst (Open-Meteo), rendert ein 296×152-BWR-Layout (Banner mit
+Ort/Uhr, Temp, gefühlt, Hoch/Tief, Feuchte, Wind), streamt es RLE-komprimiert.
+
+### `gateway/gateway_oepl_shim/` — OpenEPaperLink-AP-Emulation (empfohlen)
+Der ESP32 gibt sich nach außen als **OEPL-Accesspoint** aus → die OEPL-
+Home-Assistant-Integration (`drawcustom`) und der ESPHome-Designer (Drag&Drop)
+funktionieren unverändert. **HA rendert das Bild**, der Shim quantisiert das
+hochgeladene JPEG zu Schwarz/Weiß/Rot und funkt es per bestehendem RLE-Stream.
+- Endpunkte: `GET /`, `/sysinfo`, `/get_db` (Tag mit `hwType 0x56` =
+  „HS BWR 2.66"" = 296×152, exakter Match fürs IL0373-E2266-Panel), WS `/ws`
+  (sys/tags-Push), `POST /imgupload` (multipart-JPEG wie OEPL).
+- Erreichbar per DHCP + mDNS `pricetag-ap.local`. Tag-Enroll per NFC-UID.
+
+### Dynamische Konfig (host-gesteuert, eine Protokoll-Erweiterung)
+Die Poll-Antwort des Gateways (`NOUPDATE` / `IMG_SHOW`) trägt jetzt
+`[sleep_sekunden:2][kanal:1]`. Default = altes Verhalten (300 s, ch76), daher
+voll rückwärtskompatibel.
+- **Poll-Intervall:** `/config?poll=<s>` (z. B. 900 für Akku-Schonung).
+- **Kanal-Agilität + Auto-Scan:** `/scan[?apply=1]` misst per nRF24-RPD den
+  ruhigsten Kanal; `/config?ch=<n>` setzt ihn. Gateway sagt dem Tag den neuen
+  Kanal in der Poll-Antwort an und wechselt dann selbst; **Home-Kanal 76 =
+  fester Rendezvous + Fallback** (verpasst der Tag die Ansage, finden sich beide
+  dort wieder). CC-seitig: `radio_set_channel()` + `apply_cfg()`.
+- Aktiv auf dem Tag erst nach **Reflash** von `firmware/display.bin` über den
+  CC-Debugger; Shim und Tag sind in beide Richtungen kompatibel.
+
+### Display-Hardware-Fakt
+Das 3-Farb-Panel (IL0373/E2266) kann **kein Partial-Refresh** — laut Datenblatt
+nur „global update", Refresh ~17,4 s. Eine tickende Uhr ist damit physikalisch
+nicht möglich; Update alle paar Minuten ist die sinnvolle Kadenz. Das Pull-
+Modell (Tag schläft, pollt, zeigt nur bei neuem Bild) ist bereits das
+akkuschonende Design (Dauer-RX ~18 mA ≙ Tage; Poll-Schlaf ≙ Monate).
+
 ## Funkstrecken-Status (Stand 2026-10-16)
 
 ### CC2510 → ESP (nRF24 empfängt): FUNKTIONIERT, verifiziert
