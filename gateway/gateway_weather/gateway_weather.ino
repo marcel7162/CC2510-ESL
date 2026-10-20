@@ -34,6 +34,7 @@
 #define WIFI_PASS  "DEIN_WLAN_PASSWORT"
 #define LAT        "0.0000"        // Breitengrad deines Standorts
 #define LON        "0.0000"        // Laengengrad deines Standorts
+#define CITY       "Zuhause"       // Ortsname fuer den Banner (frei waehlbar)
 #define TZ_STRING  "CET-1CEST,M3.5.0,M10.5.0/3"
 #define WEATHER_INTERVAL 900000UL   // 15 min
 // =========================================================
@@ -108,6 +109,8 @@ struct Pend { uint8_t uid[7]; uint8_t label[4]; };
 Pend pend[MAX_PENDING]; uint8_t pendCount = 0;
 
 bool wxValid = false; float wxTemp = 0; int wxCode = -1; uint32_t lastWeather = 0;
+// Zusatzwerte fuer das volle Layout (alle optional - -999 = "kein Wert").
+float wxApp = -999, wxMax = -999, wxMin = -999, wxWind = -999; int wxHum = -1;
 
 // ---------- helpers ----------
 String hexBytes(const uint8_t *p, uint8_t n, char sep) {
@@ -209,50 +212,82 @@ void drawIcon(int kind, int cx, int cy) {
     }
 }
 
+// Kleines Grad-Ringlein hinter einer 9pt-Zahl: Label + gerundeter Wert + "°".
+// Gibt nichts aus, wenn der Wert fehlt (-999), damit das Layout Luecken schluckt.
+void printTempLine(int x, int y, const char* pre, float v) {
+    if (v <= -900) return;
+    char b[8]; snprintf(b,sizeof(b),"%d",(int)lroundf(v));
+    cb.setFont(&FreeSans9pt7b); cb.setTextColor(1);
+    cb.setCursor(x,y);
+    if (pre && *pre) cb.print(pre);
+    cb.print(b);
+    cb.drawCircle(cb.getCursorX()+4, y-8, 2, 1);   // kleines Gradzeichen
+}
+
 void renderWeather(const char* label) {
-    char buf[16], hhmm[6];
+    char buf[16], clock[6], line[20];
     struct tm t;
-    if (getLocalTime(&t,50)) strftime(hhmm,6,"%H:%M",&t); else strcpy(hhmm,"--:--");
+    bool haveTime = getLocalTime(&t,50);
+    if (haveTime) strftime(clock,6,"%H:%M",&t); else strcpy(clock,"--:--");
+    static const char* wd[] = {"So","Mo","Di","Mi","Do","Fr","Sa"};
 
     cb.fillScreen(0);
     cr.fillScreen(0);
 
-    // Banner: red bar, white (cleared) title + time
-    cr.fillRect(0,0,SCR_W,30,1);
+    // --- Banner (rote Leiste, weiss ausgestanzt): Ort links, Tag+Uhr rechts ---
+    cr.fillRect(0,0,SCR_W,28,1);
     cr.setFont(&FreeSans9pt7b);
     cr.setTextColor(0);               // 0 = punch white holes in the red bar
-    cr.setCursor(8,21); cr.print("WETTER");
-    cr.setCursor(230,21); cr.print(hhmm);
+    cr.setCursor(6,20); cr.print(CITY);
+    if (haveTime) snprintf(line,sizeof(line),"%s %s", wd[t.tm_wday & 7], clock);
+    else          snprintf(line,sizeof(line),"%s", clock);
+    int16_t bx,by; uint16_t bw,bh;
+    cr.getTextBounds(line,0,0,&bx,&by,&bw,&bh);
+    cr.setCursor(SCR_W-6-bw,20); cr.print(line);
 
     if (wxValid) {
-        // Big temperature (black)
-        int tC = (int)lroundf(wxTemp);
-        snprintf(buf,sizeof(buf),"%d",tC);
-        cb.setFont(&FreeSansBold24pt7b);
-        cb.setTextColor(1);
-        cb.setCursor(10,92); cb.print(buf);
-        int16_t bx,by; uint16_t bw2,bh; cb.getTextBounds(buf,10,92,&bx,&by,&bw2,&bh);
-        int dx = 10 + bw2 + 10;
-        cb.drawCircle(dx, 58, 5, 1); cb.drawCircle(dx, 58, 4, 1);   // degree
+        // --- Grosse Temperatur (schwarz) ---
+        snprintf(buf,sizeof(buf),"%d",(int)lroundf(wxTemp));
+        cb.setFont(&FreeSansBold24pt7b); cb.setTextColor(1);
+        cb.setCursor(8,84); cb.print(buf);
+        cb.getTextBounds(buf,8,84,&bx,&by,&bw,&bh);
+        int dx = 8 + bw + 10;
+        cb.drawCircle(dx, 52, 5, 1); cb.drawCircle(dx, 52, 4, 1);     // Grad
         cb.setFont(&FreeSansBold12pt7b);
-        cb.setCursor(dx+10, 92); cb.print("C");
+        cb.setCursor(dx+9, 84); cb.print("C");
 
-        // Condition (red)
-        cr.setFont(&FreeSansBold12pt7b);
-        cr.setTextColor(1);
-        cr.setCursor(10, 128); cr.print(labelFor(wxCode));
+        // --- Zustand (rot) ---
+        cr.setFont(&FreeSansBold12pt7b); cr.setTextColor(1);
+        cr.setCursor(8, 112); cr.print(labelFor(wxCode));
 
-        drawIcon(iconFor(wxCode), 238, 80);
+        // --- Gefuehlt (klein, schwarz) unter dem Zustand ---
+        printTempLine(8, 136, "gefuehlt ", wxApp);
+
+        // --- Icon oben rechts ---
+        drawIcon(iconFor(wxCode), 236, 54);
+
+        // --- Rechte Spalte: Hoch/Tief/Feuchte ---
+        printTempLine(183, 98,  "Hoch ", wxMax);
+        printTempLine(183, 118, "Tief ", wxMin);
+        if (wxHum >= 0) {
+            cb.setFont(&FreeSans9pt7b); cb.setTextColor(1);
+            snprintf(line,sizeof(line),"%d%%", wxHum);
+            cb.setCursor(183,138); cb.print(line);
+            if (wxWind > -900) {
+                snprintf(line,sizeof(line),"%d km/h",(int)lroundf(wxWind));
+                cb.setCursor(221,138); cb.print(line);
+            }
+        }
     } else {
         cb.setFont(&FreeSansBold12pt7b); cb.setTextColor(1);
         cb.setCursor(10,70); cb.print("Keine Daten");
         cb.setCursor(10,100); cb.print("WLAN/Fetch?");
     }
 
-    // Footer: label id (small, built-in font)
+    // --- Footer: Tag-ID klein unten links (eingebauter Font) ---
     cb.setFont(NULL);
     cb.setTextColor(1); cb.setTextSize(1);
-    cb.setCursor(210,142); cb.print("ID "); cb.print(label);
+    cb.setCursor(2,148); cb.print("ID "); cb.print(label);
 }
 
 // Pack the two canvases into the IL0373 plane byte order.
@@ -343,7 +378,11 @@ bool fetchWeather() {
     if (WiFi.status()!=WL_CONNECTED) return false;
     WiFiClientSecure c; c.setInsecure();
     HTTPClient https;
-    String url=String("https://api.open-meteo.com/v1/forecast?latitude=")+LAT+"&longitude="+LON+"&current=temperature_2m,weather_code";
+    // current = jetzt-Werte, daily = Tages-Hoch/Tief. forecast_days=1 haelt die
+    // Antwort klein. timezone=auto, damit daily auf den lokalen Tag bezogen ist.
+    String url=String("https://api.open-meteo.com/v1/forecast?latitude=")+LAT+"&longitude="+LON
+        +"&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m"
+        +"&daily=temperature_2m_max,temperature_2m_min&forecast_days=1&timezone=auto";
     if(!https.begin(c,url)) return false;
     int code=https.GET(); bool ok=false;
     if(code==200){ String p=https.getString();
@@ -353,9 +392,27 @@ bool fetchWeather() {
         int cur=p.indexOf("\"current\":");
         int ti=(cur>=0)?p.indexOf("temperature_2m\":",cur):-1;
         int ci=(cur>=0)?p.indexOf("weather_code\":",cur):-1;
-        if(ti>=0&&ci>=0){ wxTemp=p.substring(ti+16).toFloat(); wxCode=p.substring(ci+14).toInt(); wxValid=true; ok=true; } }
+        if(ti>=0&&ci>=0){
+            wxTemp=p.substring(ti+16).toFloat(); wxCode=p.substring(ci+14).toInt();
+            wxValid=true; ok=true;
+            // Zusatzwerte - fehlen sie, bleibt der jeweilige Default (-999/-1)
+            // und das Layout blendet die Zeile einfach aus.
+            int ai=p.indexOf("apparent_temperature\":",cur);
+            int hi=p.indexOf("relative_humidity_2m\":",cur);
+            int wi=p.indexOf("wind_speed_10m\":",cur);
+            wxApp = (ai>=0)? p.substring(ai+22).toFloat() : -999;
+            wxHum = (hi>=0)? p.substring(hi+22).toInt()   : -1;
+            wxWind= (wi>=0)? p.substring(wi+16).toFloat() : -999;
+            // daily-Bloecke sind Arrays: "temperature_2m_max":[23.4]
+            int dly=p.indexOf("\"daily\":");
+            int xi=(dly>=0)?p.indexOf("temperature_2m_max\":[",dly):-1;
+            int ni=(dly>=0)?p.indexOf("temperature_2m_min\":[",dly):-1;
+            wxMax = (xi>=0)? p.substring(xi+21).toFloat() : -999;
+            wxMin = (ni>=0)? p.substring(ni+21).toFloat() : -999;
+        } }
     https.end();
-    Serial.printf("[wx] %d temp=%.1f code=%d %s\n", code, wxTemp, wxCode, ok?"OK":"FAIL");
+    Serial.printf("[wx] %d temp=%.1f app=%.1f hum=%d wind=%.1f max=%.1f min=%.1f code=%d %s\n",
+                  code, wxTemp, wxApp, wxHum, wxWind, wxMax, wxMin, wxCode, ok?"OK":"FAIL");
     return ok;
 }
 
