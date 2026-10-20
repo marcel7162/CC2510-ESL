@@ -466,28 +466,55 @@ void startServer(){
 }
 
 // ---------- setup / loop ----------
+// --- WLAN-Auto-Reconnect: haelt die Verbindung, versucht bei Fehlversuch/Abriss
+//     immer wieder neu und erledigt die Netz-Init (mDNS/Zeit/Webserver) genau
+//     einmal, sobald das WLAN steht. Absichtliches WLAN-Aus (waehrend eines
+//     Funk-Streams) wird respektiert. ---
+static bool wifiWasConnected = false;
+static uint32_t wifiNextTry = 0;
+void ensureWifi(){
+    static bool netInit = false;
+    if(WiFi.getMode()==WIFI_OFF) return;                 // absichtlich aus -> in Ruhe lassen
+    if(WiFi.status()==WL_CONNECTED){
+        if(!wifiWasConnected){
+            wifiWasConnected = true;
+            Serial.printf("WiFi verbunden: %s  (http://%s.local)\n", WiFi.localIP().toString().c_str(), MDNS_NAME);
+            configTzTime(TZ_STRING,"pool.ntp.org","time.google.com");
+            if(!netInit){                                // Server/mDNS nur einmal starten
+                netInit = true;
+                if(MDNS.begin(MDNS_NAME)) MDNS.addService("http","tcp",80);
+                startServer();
+            }
+        }
+        return;
+    }
+    if(wifiWasConnected){ wifiWasConnected=false; Serial.println("WiFi getrennt - versuche erneut..."); }
+    if(millis() >= wifiNextTry){
+        wifiNextTry = millis() + 5000;                   // alle 5 s neuer Versuch
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+        Serial.println("WiFi: erneuter Verbindungsversuch...");
+    }
+}
+
 void setup(){
-    Serial.begin(115200); while(!Serial) delay(10);
+    Serial.begin(115200);
+    { uint32_t _t=millis(); while(!Serial && millis()-_t<1500) delay(10); }  // nicht ewig auf USB-Serial warten
     Serial.println("\n=== PriceTag Gateway (OpenEPaperLink-AP-Shim) ===");
     prefs.begin("pricetag",false); loadReg();
     Serial.printf("Registry: %u Tag(s)\n", regCount);
     for(uint8_t i=0;i<regCount;i++)
         Serial.printf("  0x%02X  mac=%s  label=%s\n", reg[i].addr, tagMacStr(i).c_str(), hexBytes(reg[i].label,4,0).c_str());
 
-    WiFi.mode(WIFI_STA);
+    WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true);
 #if USE_STATIC_IP
     if(!WiFi.config(STATIC_IP, STATIC_GW, STATIC_SN, STATIC_DNS))
         Serial.println("WARN: WiFi.config (feste IP) fehlgeschlagen");
 #endif
     WiFi.begin(WIFI_SSID,WIFI_PASS); Serial.print("WiFi");
     for(int i=0;i<40 && WiFi.status()!=WL_CONNECTED;i++){ delay(250); Serial.print("."); }
-    if(WiFi.status()==WL_CONNECTED){
-        Serial.printf(" ok  IP=%s  (http://%s.local)\n", WiFi.localIP().toString().c_str(), MDNS_NAME);
-        if(MDNS.begin(MDNS_NAME)) MDNS.addService("http","tcp",80);
-        configTzTime(TZ_STRING,"pool.ntp.org","time.google.com");
-    } else {
-        Serial.println(" FEHLT (HA-Anbindung erst nach WLAN moeglich)");
-    }
+    // Verbindung, Reconnect und Netz-Init (mDNS/Zeit/Server) uebernimmt
+    // ensureWifi() in loop() - auch wenn der erste Versuch hier scheitert.
+    Serial.println(WiFi.status()==WL_CONNECTED ? " ok" : " FEHLT (versuche im Hintergrund weiter)");
 
     SPI.begin(3,9,7,CSN_PIN);
     if(!radio.begin(&SPI)){ Serial.println("ERROR nRF24"); while(1) delay(1000); }
@@ -495,13 +522,13 @@ void setup(){
     radio.setPayloadSize(NRF_PAYLOAD_SIZE); radio.setAutoAck(false); radio.setRetries(0,0);
     radio.disableDynamicPayloads(); radio.disableCRC(); modeRx();
 
-    if(WiFi.status()==WL_CONNECTED) startServer();
     Serial.println("Bereit. Tag per NFC/Boot meldet sich an (Auto-Enroll).\n");
 }
 
 uint32_t lastSysPush = 0;
 
 void loop(){
+    ensureWifi();
     ws.cleanupClients();
 
     // Periodischer sys-Push, damit HA den AP als online fuehrt.

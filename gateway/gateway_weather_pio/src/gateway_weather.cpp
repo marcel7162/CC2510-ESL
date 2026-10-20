@@ -500,14 +500,40 @@ void handleSerial(){ while(Serial.available()){ char c=Serial.read();
     if(c=='y'||c=='Y')approveOldest(); else if(c=='n'||c=='N')rejectOldest(); else if(c=='l'||c=='L')listAll();
     else if(c=='w'||c=='W'){fetchWeather();Serial.println("Wetter geholt - Display zeigt es beim naechsten Poll");} else if(c=='x'||c=='X')toggleWifi(); } }
 
+// --- WLAN-Auto-Reconnect: haelt die Verbindung und versucht bei einem
+//     Fehlversuch bzw. Abriss immer wieder neu (nicht-blockierend aus loop()).
+//     Ein absichtliches WLAN-Aus (waehrend eines Funk-Streams / x-Test) wird
+//     respektiert und nicht ueberschrieben. ---
+static bool wifiWasConnected = false;
+static uint32_t wifiNextTry = 0;
+void ensureWifi(){
+    if(WiFi.getMode()==WIFI_OFF) return;                 // absichtlich aus -> in Ruhe lassen
+    if(WiFi.status()==WL_CONNECTED){
+        if(!wifiWasConnected){
+            wifiWasConnected = true;
+            Serial.printf("WiFi verbunden: %s\n", WiFi.localIP().toString().c_str());
+            configTzTime(TZ_STRING,"pool.ntp.org","time.google.com");
+            lastWeather = millis() - WEATHER_INTERVAL;   // beim naechsten loop() Wetter holen
+        }
+        return;
+    }
+    if(wifiWasConnected){ wifiWasConnected=false; Serial.println("WiFi getrennt - versuche erneut..."); }
+    if(millis() >= wifiNextTry){
+        wifiNextTry = millis() + 5000;                   // alle 5 s neuer Versuch
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+        Serial.println("WiFi: erneuter Verbindungsversuch...");
+    }
+}
+
 void setup(){
-    Serial.begin(115200); while(!Serial) delay(10);
+    Serial.begin(115200);
+    { uint32_t _t=millis(); while(!Serial && millis()-_t<1500) delay(10); }  // nicht ewig auf USB-Serial warten
     Serial.println("\n=== PriceTag Gateway (Weather / full-frame) ===");
     prefs.begin("pricetag",false); loadReg();
     Serial.printf("Registry: %u\n", regCount);
 
     // --- WiFi-HF-Diagnose: lebt das Subsystem? sieht die Antenne was? ---
-    WiFi.mode(WIFI_STA); delay(100);
+    WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true); delay(100);
     Serial.printf("WiFi-MAC=%s  (00:00:00:00:00:00 = Subsystem tot)\n", WiFi.macAddress().c_str());
     int ns=WiFi.scanNetworks();
     Serial.printf("Vor-Connect-Scan: %d Netze gefunden\n", ns<0?0:ns);
@@ -535,7 +561,8 @@ void setup(){
                 :"NEIN -> SSID-Name falsch (Gross/Klein!) oder 5GHz-only (ESP32 kann nur 2.4GHz)");
         WiFi.scanDelete();
     }
-    if(WiFi.status()==WL_CONNECTED){ configTzTime(TZ_STRING,"pool.ntp.org","time.google.com"); fetchWeather(); }
+    // Zeit + erster Wetterabruf werden von ensureWifi() ausgeloest, sobald das
+    // WLAN steht (auch wenn es erst spaeter klappt).
 
     SPI.begin(3,9,7,CSN_PIN);
     if(!radio.begin(&SPI)){ Serial.println("ERROR nRF24"); while(1) delay(1000); }
@@ -546,6 +573,7 @@ void setup(){
 }
 
 void loop(){
+    ensureWifi();
     handleSerial();
     if(millis()-lastWeather>=WEATHER_INTERVAL){
         // Nur bei Erfolg den 15-Min-Takt neu starten; schlaegt der Abruf fehl
