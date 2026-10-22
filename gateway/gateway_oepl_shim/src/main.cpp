@@ -242,7 +242,11 @@ bool waitAck(uint32_t to,uint8_t seq){
     return false;
 }
 bool sendReliable(uint8_t addr,const uint8_t*d,uint8_t n,uint32_t to,uint8_t tries,uint8_t seq){
-    for(uint8_t t=0;t<tries;t++){ if(t) streamReTx++; modeTx(); writeCmd(addr,d,n); modeRx(); if(waitAck(to,seq)){ delay(3); return true; } }
+    for(uint8_t t=0;t<tries;t++){
+        if(t){ streamReTx++; if(t%20==0) delay(50); }
+        modeTx(); writeCmd(addr,d,n); modeRx();
+        if(waitAck(to,seq)){ delay(3); return true; }
+    }
     return false;
 }
 void sendCmd(uint8_t dest,const uint8_t*d,uint8_t n){ modeTx(); writeCmd(dest,d,n); modeRx(); }
@@ -271,7 +275,7 @@ bool streamImage(uint8_t addr, int planeSize) {
 
     uint8_t d[2+IMG_CHUNK]; uint8_t s;
     s = ++txSeq; d[0] = CMD_IMG_BEGIN; d[1] = s;
-    if (!sendReliable(addr, d, 2, 150, 40, s)) { Serial.println("  BEGIN kein ACK"); return false; }
+    if (!sendReliable(addr, d, 2, 200, 80, s)) { Serial.println("  BEGIN kein ACK"); return false; }
     Serial.printf("  link@CC: RSSI=%ddBm LQI=%d (kleiner=besser) FREQEST=%d\n",
                   ((int8_t)lastRssi)/2 - 71, lastLqi & 0x7F, (int)(int8_t)lastFreq);
 
@@ -280,7 +284,7 @@ bool streamImage(uint8_t addr, int planeSize) {
         int chunk = min(IMG_CHUNK, total-i);
         s = ++txSeq; d[0]=CMD_IMG_DATA; d[1]=s;
         memcpy(&d[2], &tokens[i], chunk);
-        if (!sendReliable(addr, d, 2+chunk, 80, 60, s)) {
+        if (!sendReliable(addr, d, 2+chunk, 80, 120, s)) {
             Serial.printf("  DATA kein ACK @%d (seq=%d/%d, %d ReTx) -> Abbruch\n", i, s, total, streamReTx);
             return false;
         }
@@ -333,11 +337,17 @@ void sendFrame(uint8_t idx){
 
     led(20,0,20);  // magenta: streaming
     bool wasOn = (WiFi.getMode()!=WIFI_OFF);
-    if(wasOn){ WiFi.disconnect(true,false); WiFi.mode(WIFI_OFF); delay(30); }
+    if(wasOn){ WiFi.mode(WIFI_OFF); delay(50); }
     Serial.printf("[%lu] stream -> 0x%02X (WLAN aus fuer Stream)\n", millis(), reg[idx].addr);
     bool ok = streamImage(reg[idx].addr, ps);
     lastFrame[idx]=millis();
-    if(ok){ updateCount[idx]++; LittleFS.remove(imgPath(idx)); }
+    if(ok){
+        updateCount[idx]++;
+        tagImgPending[idx] = false;
+        LittleFS.remove(imgPath(idx));
+    } else {
+        Serial.printf("[stream] FEHLGESCHLAGEN fuer 0x%02X, Retry beim naechsten Poll\n", reg[idx].addr);
+    }
     if(wasOn){ WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID,WIFI_PASS); }
     led(0,20,0);  // gruen: bereit
 }
@@ -694,7 +704,6 @@ void loop(){
                     if(!online[idx]){ online[idx]=true; Serial.printf("[online] 0x%02X\n", src); }
                     if(tagImgPending[idx]){
                         Serial.printf("[%lu] poll 0x%02X -> stream (Bild von HA)\n", millis(), src);
-                        tagImgPending[idx]=false;
                         sendFrame(idx);
                         wsPushTag(idx);
                     } else {
