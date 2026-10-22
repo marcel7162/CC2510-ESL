@@ -3,8 +3,15 @@
 
 #include <stdint.h>
 
+#ifdef PANEL_42
+#define SCR_W 400
+#define SCR_H 300
+#define PANEL_TYPE 1
+#else
 #define SCR_W 296
 #define SCR_H 152
+#define PANEL_TYPE 0
+#endif
 
 #define WHITE 0
 #define BLACK 1
@@ -13,9 +20,9 @@
 void epd_init(void);
 void epd_wake(void);   /* re-power + configure panel (keeps draw list) */
 void epd_clear(uint8_t color);
-void epd_rect(uint16_t x, uint8_t y, uint16_t w, uint8_t h, uint8_t color);
-void epd_text(uint16_t x, uint8_t y, const char *s, uint8_t color, uint8_t scale);
-void epd_icon(uint16_t x, uint8_t y, uint16_t w, uint8_t h,
+void epd_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t color);
+void epd_text(uint16_t x, uint16_t y, const char *s, uint8_t color, uint8_t scale);
+void epd_icon(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
               const uint8_t __code *bmp, uint8_t color);
 void epd_update(void);
 void epd_sleep(void);

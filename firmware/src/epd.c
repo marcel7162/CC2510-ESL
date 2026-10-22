@@ -9,9 +9,15 @@
 #define EPD_BUSY  P1_3
 #define EPD_RESET P2_0
 
+#ifdef PANEL_42
+#define HW_W   400
+#define HW_H   300
+#define HBYTES 50
+#else
 #define HW_W   152
 #define HW_H   296
 #define HBYTES 19
+#endif
 
 // ========== 5x7 Font (ASCII 32-126, column-major, bit0=top) ==========
 static const __code uint8_t font5x7[95 * 5] = {
@@ -121,9 +127,9 @@ static const __code uint8_t font5x7[95 * 5] = {
 typedef struct {
     uint8_t type;
     uint16_t x;
-    uint8_t y;
+    uint16_t y;
     uint16_t w;
-    uint8_t h;
+    uint16_t h;
     uint8_t color;
     const char *text;
     uint8_t scale;
@@ -197,7 +203,7 @@ static uint8_t font_pixel(const char *s, uint8_t scale,
     return (font5x7[(ch - 32) * 5 + fc] >> fr) & 1;
 }
 
-static uint8_t get_color(uint16_t sx, uint8_t sy) {
+static uint8_t get_color(uint16_t sx, uint16_t sy) {
     uint8_t color = bg_color;
     uint8_t i;
 
@@ -215,9 +221,9 @@ static uint8_t get_color(uint16_t sx, uint8_t sy) {
                 color = it->color;
         } else if (it->type == ITEM_ICON) {
             uint16_t col = sx - it->x;
-            uint8_t  row = sy - it->y;
+            uint16_t row = sy - it->y;
             uint8_t  bpr = (uint8_t)((it->w + 7) >> 3);
-            uint8_t  b = it->bmp[(uint16_t)row * bpr + (col >> 3)];
+            uint8_t  b = it->bmp[row * bpr + (col >> 3)];
             if (b & (0x80 >> (col & 7)))
                 color = it->color;
         }
@@ -262,11 +268,22 @@ void epd_wake(void) {
     cmd(0x04);
     wait_busy();
 
+#ifdef PANEL_42
+    /* IL0398 (4.2" 400x300 BWR): 1-byte panel setting, 4-byte resolution */
+    cmd(0x00);
+    dat(0x0F);
+
+    cmd(0x61);
+    dat((uint8_t)(HW_W >> 8)); dat((uint8_t)(HW_W & 0xFF));
+    dat((uint8_t)(HW_H >> 8)); dat((uint8_t)(HW_H & 0xFF));
+#else
+    /* IL0373 (2.66" 296x152 BWR): 2-byte panel setting, 3-byte resolution */
     cmd(0x00);
     dat(0x0F); dat(0x0D);
 
     cmd(0x61);
     dat(HW_W); dat(HW_H >> 8); dat(HW_H & 0xFF);
+#endif
 
     cmd(0x50);
     dat(0x77);
@@ -283,7 +300,7 @@ void epd_clear(uint8_t color) {
     item_count = 0;
 }
 
-void epd_rect(uint16_t x, uint8_t y, uint16_t w, uint8_t h, uint8_t color) {
+void epd_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t color) {
     DrawItem *it;
     if (item_count >= MAX_ITEMS) return;
     it = &items[item_count++];
@@ -297,7 +314,7 @@ void epd_rect(uint16_t x, uint8_t y, uint16_t w, uint8_t h, uint8_t color) {
     it->scale = 0;
 }
 
-void epd_text(uint16_t x, uint8_t y, const char *s, uint8_t color, uint8_t scale) {
+void epd_text(uint16_t x, uint16_t y, const char *s, uint8_t color, uint8_t scale) {
     DrawItem *it;
     uint8_t len = 0;
     const char *p = s;
@@ -314,7 +331,7 @@ void epd_text(uint16_t x, uint8_t y, const char *s, uint8_t color, uint8_t scale
     it->scale = scale;
 }
 
-void epd_icon(uint16_t x, uint8_t y, uint16_t w, uint8_t h,
+void epd_icon(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
               const uint8_t __code *bmp, uint8_t color) {
     DrawItem *it;
     if (item_count >= MAX_ITEMS) return;
@@ -340,10 +357,14 @@ void epd_update(void) {
         for (bc = 0; bc < HBYTES; bc++) {
             uint8_t val = 0xFF;
             for (bit = 0; bit < 8; bit++) {
+#ifdef PANEL_42
+                uint16_t sx = (uint16_t)(bc * 8 + bit);
+                uint16_t sy = r;
+#else
                 uint16_t sx = r;
-                uint8_t sy = (HW_W - 1) - (uint8_t)(bc * 8 + bit);
-                uint8_t c = get_color(sx, sy);
-                if (c == BLACK)
+                uint16_t sy = (uint16_t)((HW_W - 1) - (bc * 8 + bit));
+#endif
+                if (get_color(sx, sy) == BLACK)
                     val &= ~(0x80 >> bit);
             }
             dat(val);
@@ -356,10 +377,14 @@ void epd_update(void) {
         for (bc = 0; bc < HBYTES; bc++) {
             uint8_t val = 0xFF;
             for (bit = 0; bit < 8; bit++) {
+#ifdef PANEL_42
+                uint16_t sx = (uint16_t)(bc * 8 + bit);
+                uint16_t sy = r;
+#else
                 uint16_t sx = r;
-                uint8_t sy = (HW_W - 1) - (uint8_t)(bc * 8 + bit);
-                uint8_t c = get_color(sx, sy);
-                if (c == RED)
+                uint16_t sy = (uint16_t)((HW_W - 1) - (bc * 8 + bit));
+#endif
+                if (get_color(sx, sy) == RED)
                     val &= ~(0x80 >> bit);
             }
             dat(val);

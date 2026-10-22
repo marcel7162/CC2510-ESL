@@ -2,16 +2,21 @@
 
 ## Ziel
 
-Ein Imagotag-ESL (Electronic Shelf Label) mit CC2510 + IL0373 E-Ink Display
-als Home Assistant Display nutzen: Wetter, Energie, Status.
+Imagotag-ESL (Electronic Shelf Labels) mit CC2510 + E-Ink als Home Assistant
+Displays nutzen: Wetter, Energie, Status. Zwei Panel-Größen parallel am selben
+Gateway:
+- **2,66"** 296×152 BWR (IL0373/E2266) — hwType 0x56
+- **4,2"**  400×300 BWR (IL0398/E2417JS0D1) — hwType 0x02
 
 ## Architektur
 
 ```
-Home Assistant ──MQTT──▶ ESP32-S3 Gateway ──nRF24 (250kbps, ch76)──▶ CC2510 ──SPI──▶ E-Ink (296x152, 3 Farben)
+Home Assistant ──drawcustom──▶ ESP32-S3 Gateway (OEPL-Shim) ──nRF24──▶ CC2510 ──SPI──▶ E-Ink
+                                 │ per Tag: hwType → HA rendert passende Auflösung
+                                 │ JPEG → BWR-Quantisierung → RLE → Funk-Stream
 ```
 
-## Stand 2026-10-20: PlatformIO, HA-Anbindung über OEPL-Shim, dynamische Konfig
+## Stand 2026-10-22: Dual-Display (2,66" + 4,2"), OEPL-Shim, dynamische Konfig
 
 Aktueller, lauffähiger Stand nach der HA-Integration. Die drei Gateway-Builds
 liegen in `gateway/`, jeweils als PlatformIO-Projekt (pioarduino-Core
@@ -35,9 +40,14 @@ Der ESP32 gibt sich nach außen als **OEPL-Accesspoint** aus → die OEPL-
 Home-Assistant-Integration (`drawcustom`) und der ESPHome-Designer (Drag&Drop)
 funktionieren unverändert. **HA rendert das Bild**, der Shim quantisiert das
 hochgeladene JPEG zu Schwarz/Weiß/Rot und funkt es per bestehendem RLE-Stream.
-- Endpunkte: `GET /`, `/sysinfo`, `/get_db` (Tag mit `hwType 0x56` =
-  „HS BWR 2.66"" = 296×152, exakter Match fürs IL0373-E2266-Panel), WS `/ws`
-  (sys/tags-Push), `POST /imgupload` (multipart-JPEG wie OEPL).
+- **Dual-Display:** Jeder Tag meldet seinen Panel-Typ beim Enroll (PANEL_TYPE-
+  Byte, rückwärtskompatibel). Gateway meldet pro Tag den passenden hwType an HA
+  → HA rendert die richtige Auflösung (296×152 oder 400×300). JPEG-Decode und
+  Scan-Koordinaten sind panel-abhängig (2,66" = 90°-Rotation, 4,2" = nativ).
+- Endpunkte: `GET /`, `/sysinfo`, `/get_db` (hwType 0x56 = 2,66" / 0x02 = 4,2"),
+  WS `/ws`, `POST /imgupload`, `/settype?mac=...&type=42|266` (manueller Override).
+- NVS-Migration: alte 12-Byte-Einträge werden beim Start automatisch auf 13 Byte
+  (+ disp-Feld) migriert, Default = 2,66".
 - Erreichbar per DHCP + mDNS `pricetag-ap.local`. Tag-Enroll per NFC-UID.
 
 ### Dynamische Konfig (host-gesteuert, eine Protokoll-Erweiterung)
@@ -101,11 +111,13 @@ XOR-Prüfsumme verwirft solche Pakete (ggf. später Retransmit/FEC ergänzen).
 | Teil          | Chip/Modul       | Anschluss                      |
 |---------------|------------------|--------------------------------|
 | ESL Tag       | CC2510F32        | SoC mit 2.4GHz Radio           |
-| E-Ink Display | IL0373           | SPI (P0.0=PWR, P0.1=CS, P1.2=DC, P1.3=BUSY, P2.0=RST) |
+| E-Ink 2,66"   | IL0373 (E2266)   | 296×152 BWR, SPI (P0.0=PWR, P0.1=CS, P1.2=DC, P1.3=BUSY, P2.0=RST) |
+| E-Ink 4,2"    | IL0398 (E2417JS0D1) | 400×300 BWR, identisches SPI-Pinout |
 | Gateway       | ESP32-S3 + nRF24L01+ | SPI (CE=1, CSN=2, SCK=3, MISO=9, MOSI=7) |
 | Debugger      | ESP32-S3 (CCLib) | CC-Debug-Protokoll zum Flashen  |
 
-Display: 296 x 152 Pixel, 3 Farben (schwarz, weiß, rot)
+Displays: 3 Farben (schwarz, weiß, rot), identische SPI-Verdrahtung.
+CC2510-Firmware: `make display` → 2,66", `make display42` → 4,2" (compile-time `-DPANEL_42`).
 
 ## Projektstatus
 
@@ -139,8 +151,8 @@ Ziel: ESP32 Gateway schickt Zeichenkommandos per Funk, CC2510 zeigt sie an.
 - [x] Demo: HA-Layout (Wetter/Energie/Status) + Zähler, alle 10s neu
 - [x] PING/ACK-Handshake + UPDATE/ACK (wartet auf Refresh-Bestätigung)
 
-Build: `make display` → `firmware/display.bin` (4048 B, XRAM 612/3840).
-Flash: `python CCLib/Python/cc_write_direct.py <COM> firmware/display.bin`.
+Build: `make display` → `firmware/display.bin` (2,66"), `make display42` → `firmware/display42.bin` (4,2").
+Flash: `python CCLib/Python/cc_write_direct.py <COM> firmware/display[42].bin`.
 Gateway: `gateway/gateway_display/gateway_display.ino` auf ESP32 flashen.
 
 ### Phase 2: Home Assistant Anbindung

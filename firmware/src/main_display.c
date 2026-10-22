@@ -231,6 +231,7 @@ static void send_enroll_req(void) {
     txb[n++] = CMD_ENROLL_REQ;
     for (i = 0; i < 7; i++) txb[n++] = uid[i];
     for (i = 0; i < 4; i++) txb[n++] = label[i];
+    txb[n++] = PANEL_TYPE;
     radio_tx(txb, n);
 }
 

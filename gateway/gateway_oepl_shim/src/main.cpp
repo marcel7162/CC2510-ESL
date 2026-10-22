@@ -5,8 +5,12 @@
  * Assistant-Integration (Service drawcustom) und der ESPHome-Designer
  * (Drag&Drop) unveraendert funktionieren:
  *
- *   HA rendert JPEG (296x152) --POST /imgupload--> SHIM
+ *   HA rendert JPEG (296x152 oder 400x300) --POST /imgupload--> SHIM
  *     SHIM: JPEG -> BWR-Ebenen -> RLE -> Funk-Stream --> CC2510 -> E-Ink
+ *
+ * Unterstuetzte Displays (parallel, per Tag):
+ *   - 2.66" 296x152 BWR (IL0373, hwType 0x56)
+ *   - 4.2"  400x300 BWR (IL0398, hwType 0x02)
  *
  * Der Funk-/Enroll-/Stream-Code ist 1:1 aus gateway_weather_pio uebernommen.
  * Neu ist nur das Frontend (statt Open-Meteo + Adafruit GFX): ein HTTP/WS-
@@ -42,10 +46,26 @@ IPAddress STATIC_DNS(192,168,137,1);
 // Zusaetzlich per mDNS erreichbar: http://pricetag-ap.local (falls dein Netz
 // mDNS routet - dann ist HA sogar IP-unabhaengig).
 #define MDNS_NAME "pricetag-ap"
-// OEPL-Hardwaretyp 0x56 = "HS BWR 2.66"" 296x152 schwarz/weiss/rot -> exakter
-// Match fuer das IL0373-E2266-Panel. HA rendert damit nativ in 296x152.
-#define HW_TYPE 0x56
 // ==================================================
+
+// Display-Typen: der Tag meldet seinen Typ beim Enroll (panel_type Byte).
+#define DISP_266  0    // 2.66" 296x152 BWR (IL0373)
+#define DISP_42   1    // 4.2"  400x300 BWR (IL0398)
+
+// OEPL-hwType pro Display-Typ (steuert welche Aufloesung HA rendert)
+#define HW_TYPE_266 0x56   // "HS BWR 2.66"" 296x152
+#define HW_TYPE_42  0x02   // "M2 4.2"" 400x300 (OEPL-Fallback-Dict)
+
+// Dimensionen pro Display-Typ
+#define SCR_W_266  296
+#define SCR_H_266  152
+#define HBYTES_266 19
+#define PLANE_266  5624    // 296 * 19
+
+#define SCR_W_42   400
+#define SCR_H_42   300
+#define HBYTES_42  50
+#define PLANE_42   15000   // 300 * 50
 
 #define CE_PIN 1
 #define CSN_PIN 2
@@ -64,10 +84,7 @@ IPAddress STATIC_DNS(192,168,137,1);
 #define CMD_POLL           0x23
 #define CMD_NOUPDATE       0x24
 
-#define SCR_W 296
-#define SCR_H 152
-#define HBYTES 19
-#define PLANE 5624            // SCR_W * HBYTES
+#define PLANE_MAX PLANE_42
 #define IMG_CHUNK 12
 
 const uint8_t txAddr[5] = {0xA7, 0x5C, 0xA7, 0xAA, 0xAA};
@@ -78,20 +95,27 @@ Preferences prefs;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
-static uint8_t planeBW[PLANE];
-static uint8_t planeRD[PLANE];
-static uint8_t tokens[24000];
+static uint8_t planeBW[PLANE_MAX];
+static uint8_t planeRD[PLANE_MAX];
+static uint8_t tokens[48000];
 
-// Eingehendes JPEG von HA (296x152 BWR ist klein; 48k reicht grosszuegig).
-static uint8_t jpgBuf[48000];
+// Eingehendes JPEG von HA (400x300 BWR ist das groesste Panel; 96k reicht).
+static uint8_t jpgBuf[96000];
 static volatile size_t jpgLen = 0;
 
 // Fertig dekodiertes Bild wartet auf den naechsten Poll dieses Tags.
 volatile bool g_imgPending = false;
 volatile uint8_t g_imgAddr = 0;
+volatile uint8_t g_imgDisp = DISP_266;   // Display-Typ des pending Bildes
+
+// Aktuell dekodiertes Display (fuer den JPEG-Callback)
+static uint8_t  g_decDisp    = DISP_266;
+static uint16_t g_decScrW    = SCR_W_266;
+static uint16_t g_decScrH    = SCR_H_266;
+static uint8_t  g_decHbytes  = HBYTES_266;
 
 #define MAX_ENTRIES 16
-struct Entry { uint8_t uid[7]; uint8_t addr; uint8_t label[4]; };
+struct Entry { uint8_t uid[7]; uint8_t addr; uint8_t label[4]; uint8_t disp; };
 Entry reg[MAX_ENTRIES]; uint8_t regCount = 0;
 bool online[MAX_ENTRIES]; uint32_t lastFrame[MAX_ENTRIES]; uint32_t lastSeen[MAX_ENTRIES];
 uint32_t updateCount[MAX_ENTRIES];
@@ -135,8 +159,8 @@ void replyPending(const uint8_t *u);
 int rleEncode(const uint8_t *data, int len, uint8_t *out, int cap);
 bool streamImage(uint8_t addr);
 void sendFrame(uint8_t idx);
-void handleReq(const uint8_t *uid, const uint8_t *label);
-uint8_t approveUid(const uint8_t *uid, const uint8_t *label);
+void handleReq(const uint8_t *uid, const uint8_t *label, uint8_t dispType);
+uint8_t approveUid(const uint8_t *uid, const uint8_t *label, uint8_t dispType);
 String tagMacStr(uint8_t idx);
 int findByMac(const String &mac);
 bool jpgOutput(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bmp);
@@ -160,7 +184,27 @@ int findPend(const uint8_t *u){ for(uint8_t i=0;i<pendCount;i++) if(uidEq(pend[i
 int findAddr(uint8_t a){ for(uint8_t i=0;i<regCount;i++) if(reg[i].addr==a) return i; return -1; }
 uint8_t nextFreeAddr(){ for(uint16_t a=1;a<=254;a++){ bool u=false; for(uint8_t i=0;i<regCount;i++) if(reg[i].addr==a){u=true;break;} if(!u) return a; } return 0; }
 void saveReg(){ prefs.putBytes("reg", reg, regCount*sizeof(Entry)); }
-void loadReg(){ size_t n=prefs.getBytes("reg",reg,sizeof(reg)); regCount=n/sizeof(Entry); for(uint8_t i=0;i<MAX_ENTRIES;i++){online[i]=false;lastFrame[i]=0;lastSeen[i]=0;updateCount[i]=0;} }
+void loadReg(){
+    size_t n=prefs.getBytes("reg",reg,sizeof(reg));
+    if(n>0 && (n % sizeof(Entry)) != 0 && (n % 12) == 0){
+        /* NVS-Migration: alte Entries ohne disp-Feld (12 Byte) -> neue (13 Byte).
+         * Rueckwaerts lesen damit wir nichts ueberschreiben. */
+        uint8_t old_count = n / 12;
+        uint8_t raw[MAX_ENTRIES * 13]; memcpy(raw, reg, n);
+        for(int i=old_count-1; i>=0; i--){
+            memcpy(reg[i].uid, &raw[i*12], 7);
+            reg[i].addr = raw[i*12+7];
+            memcpy(reg[i].label, &raw[i*12+8], 4);
+            reg[i].disp = DISP_266;
+        }
+        regCount = old_count;
+        saveReg();
+        Serial.printf("[nvs] %u Eintraege von 12->13 Byte migriert\n", old_count);
+    } else {
+        regCount = n / sizeof(Entry);
+    }
+    for(uint8_t i=0;i<MAX_ENTRIES;i++){online[i]=false;lastFrame[i]=0;lastSeen[i]=0;updateCount[i]=0;}
+}
 
 uint8_t crc8(const uint8_t *p, uint8_t n){ uint8_t c=0; for(uint8_t i=0;i<n;i++){ c^=p[i]; for(uint8_t b=0;b<8;b++) c=(c&0x80)?(uint8_t)((c<<1)^0x07):(uint8_t)(c<<1);} return c; }
 
@@ -209,8 +253,9 @@ int rleEncode(const uint8_t* data, int len, uint8_t* out, int cap) {
 
 // Stream der bereits in planeBW/planeRD liegenden Ebenen (kein Rendern mehr).
 bool streamImage(uint8_t addr) {
-    int o = rleEncode(planeBW, PLANE, tokens, sizeof(tokens));
-    int o2 = (o>=0) ? rleEncode(planeRD, PLANE, tokens+o, sizeof(tokens)-o) : -1;
+    int planeSize = (g_imgDisp == DISP_42) ? PLANE_42 : PLANE_266;
+    int o = rleEncode(planeBW, planeSize, tokens, sizeof(tokens));
+    int o2 = (o>=0) ? rleEncode(planeRD, planeSize, tokens+o, sizeof(tokens)-o) : -1;
     if (o<0 || o2<0) { Serial.println("RLE overflow!"); return false; }
     int total = o + o2;
     streamReTx = 0;
@@ -257,19 +302,24 @@ void sendFrame(uint8_t idx){
 }
 
 // ---------- enroll (Auto-Freigabe: Appliance-Betrieb ohne Serial-'y') ----------
-uint8_t approveUid(const uint8_t *uid, const uint8_t *label){
+uint8_t approveUid(const uint8_t *uid, const uint8_t *label, uint8_t dispType){
     int idx=findReg(uid);
-    if(idx>=0) return reg[idx].addr;
+    if(idx>=0){
+        if(reg[idx].disp != dispType){ reg[idx].disp=dispType; saveReg(); }
+        return reg[idx].addr;
+    }
     if(regCount>=MAX_ENTRIES) return 0;
     uint8_t a=nextFreeAddr(); if(!a) return 0;
     memcpy(reg[regCount].uid,uid,7); reg[regCount].addr=a; memcpy(reg[regCount].label,label,4);
+    reg[regCount].disp=dispType;
     online[regCount]=false; lastFrame[regCount]=0; lastSeen[regCount]=0; updateCount[regCount]=0;
     regCount++; saveReg();
-    Serial.printf("[enroll] %s -> 0x%02X (auto)\n", hexBytes(label,4,0).c_str(), a);
+    const char *dname = (dispType==DISP_42) ? "4.2\"" : "2.66\"";
+    Serial.printf("[enroll] %s -> 0x%02X (%s, auto)\n", hexBytes(label,4,0).c_str(), a, dname);
     return a;
 }
-void handleReq(const uint8_t*uid,const uint8_t*label){
-    uint8_t a=approveUid(uid,label);
+void handleReq(const uint8_t*uid,const uint8_t*label, uint8_t dispType){
+    uint8_t a=approveUid(uid,label,dispType);
     if(a){ int idx=findAddr(a); replyAssign(reg[idx].uid,a); lastSeen[idx]=millis();
         if(!online[idx]){ online[idx]=true; wsPushTag(idx);
             Serial.printf("[online] %s Addr 0x%02X\n", hexBytes(reg[idx].label,4,0).c_str(), a); } }
@@ -288,22 +338,30 @@ int findByMac(const String &mac){
 }
 
 // ---------- JPEG -> BWR-Ebenen ----------
+// Das Koordinaten-Mapping haengt vom Display-Typ ab:
+// 2.66": 90°-Rotation (scan row = screen X, reversed column = screen Y)
+// 4.2":  keine Rotation (scan row = screen Y, column = screen X)
 bool jpgOutput(int16_t bx, int16_t by, uint16_t w, uint16_t h, uint16_t *bmp){
     for(uint16_t row=0; row<h; row++){
-        int Y = by + row; if(Y<0 || Y>=SCR_H) continue;
-        int p = (SCR_H-1) - Y;
-        int rowbase = (p>>3);
-        uint8_t mask = 0x80 >> (p & 7);
+        int Y = by + row; if(Y<0 || Y>=g_decScrH) continue;
         for(uint16_t col=0; col<w; col++){
-            int X = bx + col; if(X<0 || X>=SCR_W) continue;
+            int X = bx + col; if(X<0 || X>=g_decScrW) continue;
             uint16_t px = bmp[row*w + col];
             uint8_t r = ((px>>11)&0x1F)<<3;
             uint8_t g = ((px>>5)&0x3F)<<2;
             uint8_t b = (px&0x1F)<<3;
-            int idx = X*HBYTES + rowbase;
-            if(r>120 && g<90 && b<90)            planeRD[idx] &= ~mask;   // rot
-            else if((int)r+g+b < 240)            planeBW[idx] &= ~mask;   // schwarz
-            // sonst weiss (Bit bleibt gesetzt)
+
+            int idx; uint8_t mask;
+            if (g_decDisp == DISP_42) {
+                idx = Y * g_decHbytes + (X >> 3);
+                mask = 0x80 >> (X & 7);
+            } else {
+                int p = (g_decScrH - 1) - Y;
+                idx = X * g_decHbytes + (p >> 3);
+                mask = 0x80 >> (p & 7);
+            }
+            if(r>120 && g<90 && b<90)            planeRD[idx] &= ~mask;
+            else if((int)r+g+b < 240)            planeBW[idx] &= ~mask;
         }
     }
     return true;
@@ -315,7 +373,8 @@ String buildTagJson(uint8_t idx){
     String s = "{";
     s += "\"mac\":\"" + tagMacStr(idx) + "\",";
     s += "\"alias\":\"" + hexBytes(reg[idx].label,4,0) + "\",";
-    s += "\"hwType\":" + String(HW_TYPE) + ",";
+    uint8_t hwt = (reg[idx].disp == DISP_42) ? HW_TYPE_42 : HW_TYPE_266;
+    s += "\"hwType\":" + String(hwt) + ",";
     s += "\"RSSI\":" + String(((int8_t)lastRssi)/2 - 71) + ",";
     s += "\"LQI\":" + String(lastLqi & 0x7F) + ",";
     s += "\"batteryMv\":2800,";
@@ -419,6 +478,21 @@ void startServer(){
         r->send(200,"application/json",s);
     });
 
+    // Display-Typ eines Tags manuell setzen: /settype?mac=XX&type=42 oder type=266
+    server.on("/settype", HTTP_GET, [](AsyncWebServerRequest *r){
+        if(!r->hasParam("mac") || !r->hasParam("type")){
+            r->send(400,"text/plain","need ?mac=...&type=266|42"); return; }
+        int idx = findByMac(r->getParam("mac")->value());
+        if(idx<0){ r->send(404,"text/plain","unknown mac"); return; }
+        String t = r->getParam("type")->value();
+        uint8_t dt = (t=="42") ? DISP_42 : DISP_266;
+        reg[idx].disp = dt;  saveReg();
+        const char *dname = (dt==DISP_42) ? "4.2\"" : "2.66\"";
+        Serial.printf("[settype] %s -> %s\n", tagMacStr(idx).c_str(), dname);
+        r->send(200,"application/json","{\"mac\":\""+tagMacStr(idx)+"\",\"disp\":\""+dname+"\"}");
+        wsPushTag(idx);
+    });
+
     server.on("/sysinfo", HTTP_GET, [](AsyncWebServerRequest *r){
         String s = "{\"env\":\"PriceTag_CC2510_Shim\",\"alias\":\"PriceTag-Shim\",";
         s += "\"heap\":" + String(ESP.getFreeHeap()) + ",\"recordcount\":" + String(regCount) + "}";
@@ -442,15 +516,24 @@ void startServer(){
             Serial.printf("[imgupload] mac=%s len=%u idx=%d\n", mac.c_str(), (unsigned)jpgLen, idx);
             if(idx<0 || jpgLen==0){ r->send(404,"text/plain","unknown mac / no image"); jpgLen=0; return; }
 
-            memset(planeBW,0xFF,PLANE); memset(planeRD,0xFF,PLANE);
+            // Decode-Kontext an den Display-Typ des Ziel-Tags anpassen
+            uint8_t dt = reg[idx].disp;
+            g_decDisp   = dt;
+            g_decScrW   = (dt == DISP_42) ? SCR_W_42  : SCR_W_266;
+            g_decScrH   = (dt == DISP_42) ? SCR_H_42  : SCR_H_266;
+            g_decHbytes = (dt == DISP_42) ? HBYTES_42  : HBYTES_266;
+            int planeSize = (dt == DISP_42) ? PLANE_42 : PLANE_266;
+
+            memset(planeBW,0xFF,planeSize); memset(planeRD,0xFF,planeSize);
             TJpgDec.setJpgScale(1);
             TJpgDec.setCallback(jpgOutput);
             uint16_t jw=0, jh=0; TJpgDec.getJpgSize(&jw,&jh,jpgBuf,jpgLen);
             JRESULT jr = TJpgDec.drawJpg(0,0, jpgBuf, jpgLen);
             jpgLen=0;
             if(jr!=JDR_OK){ Serial.printf("[imgupload] JPEG-Decode fehlgeschlagen (%d, %ux%u)\n", jr, jw, jh); r->send(500,"text/plain","jpeg decode failed"); return; }
-            Serial.printf("[imgupload] JPEG %ux%u dekodiert -> wartet auf Poll von 0x%02X\n", jw, jh, reg[idx].addr);
-            g_imgAddr = reg[idx].addr; g_imgPending = true;
+            const char *dname = (dt==DISP_42) ? "4.2\"" : "2.66\"";
+            Serial.printf("[imgupload] JPEG %ux%u -> %s, wartet auf Poll von 0x%02X\n", jw, jh, dname, reg[idx].addr);
+            g_imgAddr = reg[idx].addr; g_imgDisp = dt; g_imgPending = true;
             r->send(200,"text/plain","OK");
         },
         [](AsyncWebServerRequest *r, String filename, size_t index, uint8_t *data, size_t len, bool final){
@@ -462,7 +545,7 @@ void startServer(){
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
     server.begin();
-    Serial.println("[http] OEPL-AP-Shim laeuft auf Port 80 (/, /sysinfo, /get_db, /ws, /imgupload)");
+    Serial.println("[http] OEPL-AP-Shim laeuft auf Port 80 (/, /sysinfo, /get_db, /ws, /imgupload, /settype)");
 }
 
 // ---------- setup / loop ----------
@@ -502,8 +585,10 @@ void setup(){
     Serial.println("\n=== PriceTag Gateway (OpenEPaperLink-AP-Shim) ===");
     prefs.begin("pricetag",false); loadReg();
     Serial.printf("Registry: %u Tag(s)\n", regCount);
-    for(uint8_t i=0;i<regCount;i++)
-        Serial.printf("  0x%02X  mac=%s  label=%s\n", reg[i].addr, tagMacStr(i).c_str(), hexBytes(reg[i].label,4,0).c_str());
+    for(uint8_t i=0;i<regCount;i++){
+        const char *dname = (reg[i].disp==DISP_42) ? "4.2\"" : "2.66\"";
+        Serial.printf("  0x%02X  mac=%s  label=%s  disp=%s\n", reg[i].addr, tagMacStr(i).c_str(), hexBytes(reg[i].label,4,0).c_str(), dname);
+    }
 
     WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true);
 #if USE_STATIC_IP
@@ -539,7 +624,10 @@ void loop(){
         if(len>=1 && (uint8_t)(len+3)<=NRF_PAYLOAD_SIZE && crc8(raw,len+2)==raw[len+2]){
             uint8_t cmd=raw[2];
             g_lastTagContact=millis();
-            if(cmd==CMD_ENROLL_REQ && len>=12){ handleReq(&raw[3],&raw[10]); }
+            if(cmd==CMD_ENROLL_REQ && len>=12){
+                uint8_t ptype = (len >= 13) ? raw[14] : DISP_266;
+                handleReq(&raw[3],&raw[10], ptype);
+            }
             else if(cmd==CMD_POLL){
                 uint8_t src=raw[0]; int idx=findAddr(src);
                 if(idx>=0){ lastSeen[idx]=millis();
