@@ -30,6 +30,7 @@
 #include <time.h>
 #include <ESPAsyncWebServer.h>
 #include <TJpg_Decoder.h>
+#include <LittleFS.h>
 #include "credentials.h"
 
 // ===================== CONFIG =====================
@@ -67,6 +68,10 @@ IPAddress STATIC_DNS(192,168,137,1);
 #define HBYTES_42  50
 #define PLANE_42   15000   // 300 * 50
 
+// WS2812 Status-LED (ESP32-S3-Zero onboard)
+#define LED_PIN 21
+static void led(uint8_t r, uint8_t g, uint8_t b){ neopixelWrite(LED_PIN, r, g, b); }
+
 #define CE_PIN 1
 #define CSN_PIN 2
 #define NRF_CHANNEL 76
@@ -95,29 +100,29 @@ Preferences prefs;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
+// Shared Decode-Buffer: nur ein Tag wird gleichzeitig dekodiert/gestreamt.
+// JPEGs liegen auf LittleFS (/img/<mac>.jpg), nicht im RAM.
 static uint8_t planeBW[PLANE_MAX];
 static uint8_t planeRD[PLANE_MAX];
 static uint8_t tokens[48000];
 
-// Eingehendes JPEG von HA (400x300 BWR ist das groesste Panel; 96k reicht).
-static uint8_t jpgBuf[96000];
+// Upload-Puffer: empfaengt das JPEG von HA, wird dann auf FS geschrieben.
+static uint8_t jpgBuf[48000];
 static volatile size_t jpgLen = 0;
 
-// Fertig dekodiertes Bild wartet auf den naechsten Poll dieses Tags.
-volatile bool g_imgPending = false;
-volatile uint8_t g_imgAddr = 0;
-volatile uint8_t g_imgDisp = DISP_266;   // Display-Typ des pending Bildes
-
-// Aktuell dekodiertes Display (fuer den JPEG-Callback)
-static uint8_t  g_decDisp    = DISP_266;
-static uint16_t g_decScrW    = SCR_W_266;
-static uint16_t g_decScrH    = SCR_H_266;
-static uint8_t  g_decHbytes  = HBYTES_266;
+// JPEG-Decode-Kontext (Geometrie + Dithering des aktuell dekodierten Displays)
+static uint8_t  g_decDisp   = DISP_266;
+static uint8_t  g_decDither = 0;
+static uint16_t g_decScrW   = SCR_W_266;
+static uint16_t g_decScrH   = SCR_H_266;
+static uint8_t  g_decHbytes = HBYTES_266;
 
 #define MAX_ENTRIES 16
 struct Entry { uint8_t uid[7]; uint8_t addr; uint8_t label[4]; uint8_t disp; };
 Entry reg[MAX_ENTRIES]; uint8_t regCount = 0;
 bool online[MAX_ENTRIES]; uint32_t lastFrame[MAX_ENTRIES]; uint32_t lastSeen[MAX_ENTRIES];
+bool tagImgPending[MAX_ENTRIES];
+uint8_t tagDither[MAX_ENTRIES];
 uint32_t updateCount[MAX_ENTRIES];
 
 uint16_t streamReTx = 0;
@@ -157,11 +162,12 @@ void sendCmd(uint8_t dest, const uint8_t *d, uint8_t n);
 void replyAssign(const uint8_t *u, uint8_t a);
 void replyPending(const uint8_t *u);
 int rleEncode(const uint8_t *data, int len, uint8_t *out, int cap);
-bool streamImage(uint8_t addr);
+bool streamImage(uint8_t addr, int planeSize);
 void sendFrame(uint8_t idx);
 void handleReq(const uint8_t *uid, const uint8_t *label, uint8_t dispType);
 uint8_t approveUid(const uint8_t *uid, const uint8_t *label, uint8_t dispType);
 String tagMacStr(uint8_t idx);
+String imgPath(uint8_t idx);
 int findByMac(const String &mac);
 bool jpgOutput(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bmp);
 void startServer();
@@ -203,7 +209,10 @@ void loadReg(){
     } else {
         regCount = n / sizeof(Entry);
     }
-    for(uint8_t i=0;i<MAX_ENTRIES;i++){online[i]=false;lastFrame[i]=0;lastSeen[i]=0;updateCount[i]=0;}
+    for(uint8_t i=0;i<MAX_ENTRIES;i++){
+        online[i]=false;lastFrame[i]=0;lastSeen[i]=0;updateCount[i]=0;tagDither[i]=0;
+        tagImgPending[i] = (i < regCount) && LittleFS.exists(imgPath(i));
+    }
 }
 
 uint8_t crc8(const uint8_t *p, uint8_t n){ uint8_t c=0; for(uint8_t i=0;i<n;i++){ c^=p[i]; for(uint8_t b=0;b<8;b++) c=(c&0x80)?(uint8_t)((c<<1)^0x07):(uint8_t)(c<<1);} return c; }
@@ -251,9 +260,7 @@ int rleEncode(const uint8_t* data, int len, uint8_t* out, int cap) {
     return o;
 }
 
-// Stream der bereits in planeBW/planeRD liegenden Ebenen (kein Rendern mehr).
-bool streamImage(uint8_t addr) {
-    int planeSize = (g_imgDisp == DISP_42) ? PLANE_42 : PLANE_266;
+bool streamImage(uint8_t addr, int planeSize) {
     int o = rleEncode(planeBW, planeSize, tokens, sizeof(tokens));
     int o2 = (o>=0) ? rleEncode(planeRD, planeSize, tokens+o, sizeof(tokens)-o) : -1;
     if (o<0 || o2<0) { Serial.println("RLE overflow!"); return false; }
@@ -290,15 +297,49 @@ bool streamImage(uint8_t addr) {
 
 // WLAN waehrend des Funk-Streams aus (stoert sonst den nRF24 massiv, s. Mess-
 // werte im Wetter-Gateway). Danach Reconnect im Hintergrund.
+// JPEG-Pfad fuer einen Tag: /img/<mac>.jpg
+String imgPath(uint8_t idx){ return "/img/" + tagMacStr(idx) + ".jpg"; }
+
+// JPEG von LittleFS laden + dekodieren in planeBW/planeRD. true bei Erfolg.
+bool decodeTagImage(uint8_t idx){
+    String path = imgPath(idx);
+    File f = LittleFS.open(path, "r");
+    if(!f){ Serial.printf("[img] %s nicht gefunden\n", path.c_str()); return false; }
+    size_t sz = f.size();
+    if(sz > sizeof(jpgBuf)){ Serial.printf("[img] %s zu gross (%u)\n", path.c_str(), (unsigned)sz); f.close(); return false; }
+    f.read(jpgBuf, sz); f.close();
+
+    uint8_t dt = reg[idx].disp;
+    g_decDisp   = dt;
+    g_decDither = tagDither[idx];
+    g_decScrW   = (dt == DISP_42) ? SCR_W_42  : SCR_W_266;
+    g_decScrH   = (dt == DISP_42) ? SCR_H_42  : SCR_H_266;
+    g_decHbytes = (dt == DISP_42) ? HBYTES_42  : HBYTES_266;
+    int planeSize = (dt == DISP_42) ? PLANE_42 : PLANE_266;
+
+    memset(planeBW,0xFF,planeSize); memset(planeRD,0xFF,planeSize);
+    TJpgDec.setJpgScale(1);
+    TJpgDec.setCallback(jpgOutput);
+    JRESULT jr = TJpgDec.drawJpg(0,0, jpgBuf, sz);
+    if(jr!=JDR_OK){ Serial.printf("[img] Decode %s fehlgeschlagen (%d)\n", path.c_str(), jr); return false; }
+    return true;
+}
+
 void sendFrame(uint8_t idx){
+    uint8_t dt = reg[idx].disp;
+    int ps = (dt == DISP_42) ? PLANE_42 : PLANE_266;
+
+    if(!decodeTagImage(idx)) return;
+
+    led(20,0,20);  // magenta: streaming
     bool wasOn = (WiFi.getMode()!=WIFI_OFF);
-    // Nur deauth, Zugangsdaten/feste IP NICHT loeschen -> schneller, gleicher IP.
     if(wasOn){ WiFi.disconnect(true,false); WiFi.mode(WIFI_OFF); delay(30); }
     Serial.printf("[%lu] stream -> 0x%02X (WLAN aus fuer Stream)\n", millis(), reg[idx].addr);
-    bool ok = streamImage(reg[idx].addr);
+    bool ok = streamImage(reg[idx].addr, ps);
     lastFrame[idx]=millis();
-    if(ok) updateCount[idx]++;
+    if(ok){ updateCount[idx]++; LittleFS.remove(imgPath(idx)); }
     if(wasOn){ WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID,WIFI_PASS); }
+    led(0,20,0);  // gruen: bereit
 }
 
 // ---------- enroll (Auto-Freigabe: Appliance-Betrieb ohne Serial-'y') ----------
@@ -337,7 +378,15 @@ int findByMac(const String &mac){
     return -1;
 }
 
-// ---------- JPEG -> BWR-Ebenen ----------
+// ---------- JPEG -> BWR-Ebenen (mit Ordered Dithering) ----------
+// 4x4 Bayer-Matrix fuer 17 Graustufen-Simulation auf BW-Display
+static const uint8_t bayer4[4][4] = {
+    {  0, 136,  34, 170 },
+    { 204,  68, 238, 102 },
+    {  51, 187,  17, 153 },
+    { 255, 119, 221,  85 }
+};
+
 // Das Koordinaten-Mapping haengt vom Display-Typ ab:
 // 2.66": 90°-Rotation (scan row = screen X, reversed column = screen Y)
 // 4.2":  keine Rotation (scan row = screen Y, column = screen X)
@@ -360,8 +409,15 @@ bool jpgOutput(int16_t bx, int16_t by, uint16_t w, uint16_t h, uint16_t *bmp){
                 idx = X * g_decHbytes + (p >> 3);
                 mask = 0x80 >> (p & 7);
             }
-            if(r>120 && g<90 && b<90)            planeRD[idx] &= ~mask;
-            else if((int)r+g+b < 240)            planeBW[idx] &= ~mask;
+
+            if(r>120 && g<90 && b<90){
+                planeRD[idx] &= ~mask;
+            } else if(g_decDither) {
+                uint8_t gray = (uint8_t)((r*77 + g*150 + b*29) >> 8);
+                if(gray < bayer4[Y & 3][X & 3]) planeBW[idx] &= ~mask;
+            } else {
+                if((int)r+g+b < 240) planeBW[idx] &= ~mask;
+            }
         }
     }
     return true;
@@ -382,7 +438,7 @@ String buildTagJson(uint8_t idx){
     s += "\"lastseen\":" + String((uint32_t)(online[idx]?now:0)) + ",";
     s += "\"nextcheckin\":" + String((uint32_t)(now+g_pollInterval)) + ",";
     s += "\"contentMode\":0,";
-    s += "\"pending\":" + String(g_imgPending && g_imgAddr==reg[idx].addr ? "true":"false") + ",";
+    s += "\"pending\":" + String(tagImgPending[idx] ? "true":"false") + ",";
     s += "\"hash\":\"0\",";
     s += "\"rotate\":0,\"lut\":0,\"ch\":" + String(g_operatingChannel) + ",";
     s += "\"ver\":1,\"capabilities\":0,\"isexternal\":false,";
@@ -516,24 +572,23 @@ void startServer(){
             Serial.printf("[imgupload] mac=%s len=%u idx=%d\n", mac.c_str(), (unsigned)jpgLen, idx);
             if(idx<0 || jpgLen==0){ r->send(404,"text/plain","unknown mac / no image"); jpgLen=0; return; }
 
-            // Decode-Kontext an den Display-Typ des Ziel-Tags anpassen
-            uint8_t dt = reg[idx].disp;
-            g_decDisp   = dt;
-            g_decScrW   = (dt == DISP_42) ? SCR_W_42  : SCR_W_266;
-            g_decScrH   = (dt == DISP_42) ? SCR_H_42  : SCR_H_266;
-            g_decHbytes = (dt == DISP_42) ? HBYTES_42  : HBYTES_266;
-            int planeSize = (dt == DISP_42) ? PLANE_42 : PLANE_266;
+            uint8_t dither = r->hasParam("dither", true) ? r->getParam("dither", true)->value().toInt() : 0;
 
-            memset(planeBW,0xFF,planeSize); memset(planeRD,0xFF,planeSize);
-            TJpgDec.setJpgScale(1);
-            TJpgDec.setCallback(jpgOutput);
-            uint16_t jw=0, jh=0; TJpgDec.getJpgSize(&jw,&jh,jpgBuf,jpgLen);
-            JRESULT jr = TJpgDec.drawJpg(0,0, jpgBuf, jpgLen);
+            led(0,15,20);  // cyan: Bild empfangen
+            String path = imgPath(idx);
+            size_t savedLen = jpgLen;
+            { File f = LittleFS.open(path, "w");
+              if(!f){ Serial.println("[imgupload] FS write failed"); r->send(500,"text/plain","fs error"); jpgLen=0; return; }
+              f.write(jpgBuf, jpgLen); f.close(); }
             jpgLen=0;
-            if(jr!=JDR_OK){ Serial.printf("[imgupload] JPEG-Decode fehlgeschlagen (%d, %ux%u)\n", jr, jw, jh); r->send(500,"text/plain","jpeg decode failed"); return; }
+
+            uint8_t dt = reg[idx].disp;
             const char *dname = (dt==DISP_42) ? "4.2\"" : "2.66\"";
-            Serial.printf("[imgupload] JPEG %ux%u -> %s, wartet auf Poll von 0x%02X\n", jw, jh, dname, reg[idx].addr);
-            g_imgAddr = reg[idx].addr; g_imgDisp = dt; g_imgPending = true;
+            Serial.printf("[imgupload] %uB -> %s (%s) dither=%u, wartet auf Poll von 0x%02X\n",
+                          (unsigned)savedLen, dname, path.c_str(), dither, reg[idx].addr);
+            tagImgPending[idx] = true;
+            tagDither[idx] = dither;
+            led(0,20,0);  // gruen: bereit
             r->send(200,"text/plain","OK");
         },
         [](AsyncWebServerRequest *r, String filename, size_t index, uint8_t *data, size_t len, bool final){
@@ -582,7 +637,10 @@ void ensureWifi(){
 void setup(){
     Serial.begin(115200);
     { uint32_t _t=millis(); while(!Serial && millis()-_t<1500) delay(10); }  // nicht ewig auf USB-Serial warten
+    led(0,0,20);  // blau: Boot
     Serial.println("\n=== PriceTag Gateway (OpenEPaperLink-AP-Shim) ===");
+    if(!LittleFS.begin(true)) Serial.println("WARN: LittleFS mount failed");
+    LittleFS.mkdir("/img");
     prefs.begin("pricetag",false); loadReg();
     Serial.printf("Registry: %u Tag(s)\n", regCount);
     for(uint8_t i=0;i<regCount;i++){
@@ -595,6 +653,7 @@ void setup(){
     if(!WiFi.config(STATIC_IP, STATIC_GW, STATIC_SN, STATIC_DNS))
         Serial.println("WARN: WiFi.config (feste IP) fehlgeschlagen");
 #endif
+    led(20,15,0);  // gelb: WiFi verbinden
     WiFi.begin(WIFI_SSID,WIFI_PASS); Serial.print("WiFi");
     for(int i=0;i<40 && WiFi.status()!=WL_CONNECTED;i++){ delay(250); Serial.print("."); }
     // Verbindung, Reconnect und Netz-Init (mDNS/Zeit/Server) uebernimmt
@@ -602,11 +661,12 @@ void setup(){
     Serial.println(WiFi.status()==WL_CONNECTED ? " ok" : " FEHLT (versuche im Hintergrund weiter)");
 
     SPI.begin(3,9,7,CSN_PIN);
-    if(!radio.begin(&SPI)){ Serial.println("ERROR nRF24"); while(1) delay(1000); }
+    if(!radio.begin(&SPI)){ led(20,0,0); Serial.println("ERROR nRF24"); while(1) delay(1000); }
     radio.setChannel(g_operatingChannel); radio.setDataRate(RF24_250KBPS); radio.setPALevel(RF24_PA_MAX);
     radio.setPayloadSize(NRF_PAYLOAD_SIZE); radio.setAutoAck(false); radio.setRetries(0,0);
     radio.disableDynamicPayloads(); radio.disableCRC(); modeRx();
 
+    led(0,20,0);  // gruen: bereit
     Serial.println("Bereit. Tag per NFC/Boot meldet sich an (Auto-Enroll).\n");
 }
 
@@ -632,10 +692,10 @@ void loop(){
                 uint8_t src=raw[0]; int idx=findAddr(src);
                 if(idx>=0){ lastSeen[idx]=millis();
                     if(!online[idx]){ online[idx]=true; Serial.printf("[online] 0x%02X\n", src); }
-                    if(g_imgPending && g_imgAddr==src){
+                    if(tagImgPending[idx]){
                         Serial.printf("[%lu] poll 0x%02X -> stream (Bild von HA)\n", millis(), src);
-                        g_imgPending=false;
-                        sendFrame(idx);                 // IMG_SHOW traegt sleep+channel
+                        tagImgPending[idx]=false;
+                        sendFrame(idx);
                         wsPushTag(idx);
                     } else {
                         // NOUPDATE traegt [sleep_hi][sleep_lo][channel]

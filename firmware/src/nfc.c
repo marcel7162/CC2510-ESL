@@ -11,6 +11,8 @@ extern void delay_ms(uint16_t ms);
 
 #define NTAG_ADDR 0x55     /* 7-bit I2C address */
 
+static __xdata uint8_t nfc_xbuf[16];
+
 /* ---------- bit-banged I2C (open-drain emulated via board pull-ups) ------- */
 
 static void i2c_delay(void) {
@@ -110,25 +112,86 @@ uint8_t nfc_write_block(uint8_t block, const uint8_t *buf16) {
 }
 
 uint8_t nfc_read_uid(uint8_t *uid7) {
-    uint8_t b[16];
-    if (!nfc_read_block(0, b)) return 0;
-    uid7[0] = b[0];
-    uid7[1] = b[1];
-    uid7[2] = b[2];
-    uid7[3] = b[4];
-    uid7[4] = b[5];
-    uid7[5] = b[6];
-    uid7[6] = b[7];
-    return (b[0] == 0x04) ? 1 : 0;   /* NXP manufacturer code */
+    if (!nfc_read_block(0, nfc_xbuf)) return 0;
+    uid7[0] = nfc_xbuf[0];
+    uid7[1] = nfc_xbuf[1];
+    uid7[2] = nfc_xbuf[2];
+    uid7[3] = nfc_xbuf[4];
+    uid7[4] = nfc_xbuf[5];
+    uid7[5] = nfc_xbuf[6];
+    uid7[6] = nfc_xbuf[7];
+    return (nfc_xbuf[0] == 0x04) ? 1 : 0;
 }
 
 uint8_t nfc_read_label(uint8_t *lbl4) {
-    uint8_t b[16];
-    if (!nfc_read_block(0x0C, b)) return 0;
-    /* ID word at bytes 12..15, little-endian -> present big-endian. */
-    lbl4[0] = b[15];
-    lbl4[1] = b[14];
-    lbl4[2] = b[13];
-    lbl4[3] = b[12];
+    if (!nfc_read_block(0x0C, nfc_xbuf)) return 0;
+    lbl4[0] = nfc_xbuf[15];
+    lbl4[1] = nfc_xbuf[14];
+    lbl4[2] = nfc_xbuf[13];
+    lbl4[3] = nfc_xbuf[12];
+    return 1;
+}
+
+/* ---- hex nibble helper ---- */
+static uint8_t hexch(uint8_t v) {
+    return (v < 10) ? ('0' + v) : ('A' + v - 10);
+}
+
+void nfc_write_ndef_url(const uint8_t *label4) {
+    static const __code uint8_t prefix[] = "pricetag-ap.local/tag/";
+    uint8_t i, p;
+
+    /* Block 1: TLV header + NDEF header + start of URI */
+    for (i = 0; i < 16; i++) nfc_xbuf[i] = 0;
+    p = 0;
+    nfc_xbuf[p++] = 0x03;        /* NDEF TLV type */
+    nfc_xbuf[p++] = 35;          /* TLV length: 4 + 1 + 22 + 8 = 35 */
+    nfc_xbuf[p++] = 0xD1;        /* MB=1 ME=1 SR=1 TNF=1 */
+    nfc_xbuf[p++] = 0x01;        /* type length */
+    nfc_xbuf[p++] = 31;          /* payload length: 1 + 22 + 8 */
+    nfc_xbuf[p++] = 0x55;        /* type 'U' */
+    nfc_xbuf[p++] = 0x03;        /* http:// */
+    for (i = 0; i < 9 && p < 16; i++) nfc_xbuf[p++] = prefix[i];
+    nfc_write_block(1, nfc_xbuf);
+
+    /* Block 2: rest of prefix + hex label */
+    for (i = 0; i < 16; i++) nfc_xbuf[i] = 0;
+    p = 0;
+    for (i = 9; i < 22; i++) nfc_xbuf[p++] = prefix[i];
+    nfc_xbuf[p++] = hexch(label4[0] >> 4);
+    nfc_xbuf[p++] = hexch(label4[0] & 0x0F);
+    nfc_xbuf[p++] = hexch(label4[1] >> 4);
+    nfc_write_block(2, nfc_xbuf);
+
+    /* Block 3: rest of hex label + terminator */
+    for (i = 0; i < 16; i++) nfc_xbuf[i] = 0;
+    p = 0;
+    nfc_xbuf[p++] = hexch(label4[1] & 0x0F);
+    nfc_xbuf[p++] = hexch(label4[2] >> 4);
+    nfc_xbuf[p++] = hexch(label4[2] & 0x0F);
+    nfc_xbuf[p++] = hexch(label4[3] >> 4);
+    nfc_xbuf[p++] = hexch(label4[3] & 0x0F);
+    nfc_xbuf[p++] = 0xFE;        /* terminator TLV */
+    nfc_write_block(3, nfc_xbuf);
+}
+
+void nfc_write_status(uint8_t rssi, uint8_t lqi, uint16_t polls, uint8_t misses) {
+    uint8_t i;
+    for (i = 0; i < 16; i++) nfc_xbuf[i] = 0;
+    nfc_xbuf[0] = 0x53; nfc_xbuf[1] = 0x54;
+    nfc_xbuf[2] = rssi;
+    nfc_xbuf[3] = lqi;
+    nfc_xbuf[4] = (uint8_t)(polls >> 8);
+    nfc_xbuf[5] = (uint8_t)(polls & 0xFF);
+    nfc_xbuf[6] = misses;
+    nfc_write_block(NFC_STATUS_BLOCK, nfc_xbuf);
+}
+
+uint8_t nfc_read_config(uint16_t *poll_s, uint8_t *channel, uint8_t *flags) {
+    if (!nfc_read_block(NFC_CFG_BLOCK, nfc_xbuf)) return 0;
+    if (nfc_xbuf[0] != NFC_MAGIC0 || nfc_xbuf[1] != NFC_MAGIC1) return 0;
+    *poll_s  = ((uint16_t)nfc_xbuf[2] << 8) | nfc_xbuf[3];
+    *channel = nfc_xbuf[4];
+    *flags   = nfc_xbuf[5];
     return 1;
 }

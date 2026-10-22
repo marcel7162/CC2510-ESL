@@ -89,6 +89,11 @@ static __xdata uint8_t rxb[RADIO_MAX_PAYLOAD];
 static __xdata char line_id[20];
 static __xdata char line_status[24];
 
+static __xdata uint16_t g_poll_count = 0;
+static __xdata uint8_t  g_ndef_written = 0;
+static __xdata uint8_t  g_has_image = 0;
+static __xdata uint8_t  g_offline_shown = 0;
+
 /* Image-stream de-duplication: the gateway tags every reliable packet with a
  * monotonic seq. Because the link is stop-and-wait, a lost ACK makes the
  * gateway retransmit the SAME packet; without dedup the CC would feed those
@@ -220,6 +225,15 @@ static void show(const char *status) {
     epd_render();
 }
 
+static void show_offline(void) {
+    epd_clear(WHITE);
+    epd_rect(0, 0, SCR_W, 20, RED);
+    epd_text(8, 4, "OFFLINE", WHITE, 2);
+    epd_text(10, 30, line_id, BLACK, 1);
+    epd_text(10, 44, "Suche Gateway...", BLACK, 1);
+    epd_render();
+}
+
 static uint8_t uid_matches(const uint8_t *p) {
     uint8_t i;
     for (i = 0; i < 7; i++) if (p[i] != uid[i]) return 0;
@@ -255,37 +269,38 @@ static void send_ack(uint8_t status, uint8_t seq) {
 }
 
 /*
- * Enroll on 0x00; returns the assigned short address. Blocks until assigned.
- * Deliberately draws NOTHING on the happy path: e-ink keeps its last image
- * with no power, so a silent re-enroll (e.g. after the gateway rebooted)
- * leaves the current weather on screen instead of flashing status screens.
- * Only a genuinely new tag that needs operator approval shows one screen.
- * The 600ms RX window IS the pacing - no blind delay that could swallow the
- * reply, so enrollment locks on the first answer whichever side booted first.
+ * Enroll on 0x00: try `max_attempts` times (each ~600ms), return the assigned
+ * address or 0 if the gateway didn't respond. The caller decides whether to
+ * sleep and retry, so the tag doesn't burn battery in a busy loop. Draws
+ * NOTHING on screen, keeping the last weather image intact.
  */
+#define ENROLL_ATTEMPTS 10
+
 static uint8_t do_enroll(void) {
-    uint8_t len;
+    uint8_t len, attempt;
     uint8_t shown_wait = 0;
 
     radio_set_addr(ENROLL_ADDR);
 
-    for (;;) {
-        LED_R = 1;                 /* searching: red blink per attempt */
+    for (attempt = 0; attempt < ENROLL_ATTEMPTS; attempt++) {
+        LED_R = 1;
         send_enroll_req();
         LED_R = 0;
         if (radio_rx(rxb, &len, 600)) {
             if (rxb[0] == CMD_ENROLL_ASSIGN && len >= 9 && uid_matches(&rxb[1])) {
                 radio_set_addr(rxb[8]);
                 LED_G = 1; delay_ms(80); LED_G = 0; delay_ms(80);
-                LED_G = 1; delay_ms(80); LED_G = 0;   /* enrolled: green */
+                LED_G = 1; delay_ms(80); LED_G = 0;
                 return rxb[8];
             } else if (rxb[0] == CMD_ENROLL_PENDING && len >= 8
                        && uid_matches(&rxb[1]) && !shown_wait) {
                 show("Warte Freigabe");
                 shown_wait = 1;
+                attempt = 0;   /* keep trying while gateway says "pending" */
             }
         }
     }
+    return 0;
 }
 
 /* Process one received image-stream packet (BEGIN/DATA/SHOW) with seq dedup
@@ -410,36 +425,59 @@ void main(void) {
     nfc_read_label(label);
     build_id_line();
 
-    /* One boot screen as a sign of life; the first polled image replaces it. */
     show("Verbinde...");
 
     for (;;) {
-        /* Enrollment + recovery always happen on the fixed home channel - the
-         * invariant rendezvous. A failed channel switch (tag or gateway lost the
-         * command) ends here, and both sides meet again on home. */
+        uint8_t addr;
+
         g_cur_channel = HOME_CHANNEL; g_next_channel = HOME_CHANNEL;
         radio_set_channel(HOME_CHANNEL);
-        do_enroll();            /* get our address (silent on the happy path) */
 
-        /* Pull loop: poll, take an image if offered, then deep-sleep. The tag
-         * is off ~99% of the time; the e-ink holds the picture meanwhile. Sleep
-         * length and channel come from the gateway's replies (apply_cfg). */
+        addr = do_enroll();
+        if (addr == 0) {
+            /* Gateway nicht erreichbar. Einmal Offline-Marker zeigen (nur wenn
+             * schon ein Wetterbild da war), dann schlafen statt busy-wait. */
+            if (g_has_image && !g_offline_shown) {
+                show_offline();
+                g_offline_shown = 1;
+            }
+            radio_sleep();
+            cc_sleep(30);
+            radio_wake();
+            continue;
+        }
+
+        g_offline_shown = 0;
+        if (!g_ndef_written) { nfc_write_ndef_url(label); g_ndef_written = 1; }
+
         misses = 0;
         for (;;) {
-            if (poll_once() == POLL_SILENT) {
+            uint8_t result = poll_once();
+            g_poll_count++;
+            if (result == POLL_UPDATED) g_has_image = 1;
+            if (result == POLL_SILENT) {
                 if (++misses >= POLL_MISS_LIMIT)
-                    break;      /* gateway gone / lost us -> re-enroll on home */
+                    break;
             } else {
                 misses = 0;
             }
-            /* Adopt a gateway-commanded channel change for the next cycle. */
             if (g_next_channel != g_cur_channel) {
                 radio_set_channel(g_next_channel);
                 g_cur_channel = g_next_channel;
             }
-            radio_sleep();      /* radio off before sleeping */
+
+            nfc_write_status(radio_rssi, radio_lqi, g_poll_count, misses);
+
+            { uint16_t cfg_poll; uint8_t cfg_ch, cfg_flags;
+              if (nfc_read_config(&cfg_poll, &cfg_ch, &cfg_flags)) {
+                  if (cfg_poll >= 10 && cfg_poll <= 65000) g_poll_secs = cfg_poll;
+                  if (cfg_ch >= 1 && cfg_ch <= 125) g_next_channel = cfg_ch;
+              }
+            }
+
+            radio_sleep();
             cc_sleep(g_poll_secs);
-            radio_wake();       /* crystal + radio back up (config retained) */
+            radio_wake();
         }
     }
 }

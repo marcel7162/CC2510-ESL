@@ -170,10 +170,9 @@ static void dat(uint8_t d) {
 }
 
 static uint8_t wait_busy(void) {
-    uint16_t t = 10000;
+    uint16_t t = 30000;
     while (EPD_BUSY == 0 && --t)
         delay_ms(1);
-    delay_ms(200);
     return t > 0;
 }
 
@@ -255,12 +254,12 @@ void epd_wake(void) {
 
     EPD_CS = 1;
     EPD_PWR = 0;
-    delay_ms(1000);
+    delay_ms(200);
 
     EPD_RESET = 0;
-    delay_ms(100);
+    delay_ms(10);
     EPD_RESET = 1;
-    delay_ms(100);
+    delay_ms(10);
 
     cmd(0x06);
     dat(0x17); dat(0x17); dat(0x17);
