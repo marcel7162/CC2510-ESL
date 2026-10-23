@@ -31,6 +31,7 @@
 #include <ESPAsyncWebServer.h>
 #include <TJpg_Decoder.h>
 #include <LittleFS.h>
+#include <stdarg.h>
 #include "credentials.h"
 
 // ===================== CONFIG =====================
@@ -99,6 +100,29 @@ RF24 radio(CE_PIN, CSN_PIN);
 Preferences prefs;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+
+// ---- In-RAM Protokoll-Log, im Browser unter /log sichtbar ----
+// Spiegelt jede Log-Zeile zusaetzlich auf USB-Serial. Reiner Ringpuffer: laeuft
+// er voll, werden die aeltesten Bytes verworfen. Kein Fremd-Library noetig.
+static char     g_log[6000];
+static uint16_t g_logLen = 0;
+static void logStr(const char *s){
+    Serial.print(s);
+    uint16_t n = (uint16_t)strlen(s);
+    if(n >= sizeof(g_log)){ s += n - (sizeof(g_log) - 1); n = sizeof(g_log) - 1; }
+    if((uint32_t)g_logLen + n > sizeof(g_log) - 1){
+        uint16_t need = (uint16_t)((uint32_t)g_logLen + n - (sizeof(g_log) - 1));
+        if(need > g_logLen) need = g_logLen;
+        memmove(g_log, g_log + need, g_logLen - need);
+        g_logLen -= need;
+    }
+    memcpy(g_log + g_logLen, s, n); g_logLen += n; g_log[g_logLen] = 0;
+}
+static void logf(const char *fmt, ...){
+    char tmp[200];
+    va_list ap; va_start(ap, fmt); vsnprintf(tmp, sizeof(tmp), fmt, ap); va_end(ap);
+    logStr(tmp);
+}
 
 // Shared Decode-Buffer: nur ein Tag wird gleichzeitig dekodiert/gestreamt.
 // JPEGs liegen auf LittleFS (/img/<mac>.jpg), nicht im RAM.
@@ -294,7 +318,7 @@ bool streamImage(uint8_t addr, int planeSize) {
     s = ++txSeq; d[0]=CMD_IMG_SHOW; d[1]=s;
     d[2]=(uint8_t)(g_pollInterval>>8); d[3]=(uint8_t)g_pollInterval; d[4]=g_advertChannel;
     bool ok = sendReliable(addr, d, 5, 60000, 3, s);   // + sleep(2) + channel(1)
-    Serial.printf("  stream %d RLE-Bytes in %d Paketen, %d ReTx, refresh %s\n",
+    logf("  stream %d RLE-Bytes in %d Paketen, %d ReTx, refresh %s\n",
                   total, sent, streamReTx, ok?"OK":"FAIL");
     return ok;
 }
@@ -338,7 +362,7 @@ void sendFrame(uint8_t idx){
     led(20,0,20);  // magenta: streaming
     bool wasOn = (WiFi.getMode()!=WIFI_OFF);
     if(wasOn){ WiFi.mode(WIFI_OFF); delay(50); }
-    Serial.printf("[%lu] stream -> 0x%02X (WLAN aus fuer Stream)\n", millis(), reg[idx].addr);
+    logf("[%lu] stream -> 0x%02X (WLAN aus fuer Stream)\n", (unsigned long)millis(), reg[idx].addr);
     bool ok = streamImage(reg[idx].addr, ps);
     lastFrame[idx]=millis();
     if(ok){
@@ -346,7 +370,7 @@ void sendFrame(uint8_t idx){
         tagImgPending[idx] = false;
         LittleFS.remove(imgPath(idx));
     } else {
-        Serial.printf("[stream] FEHLGESCHLAGEN fuer 0x%02X, Retry beim naechsten Poll\n", reg[idx].addr);
+        logf("[stream] FEHLGESCHLAGEN fuer 0x%02X, Retry beim naechsten Poll\n", reg[idx].addr);
     }
     if(wasOn){ WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID,WIFI_PASS); }
     led(0,20,0);  // gruen: bereit
@@ -366,14 +390,14 @@ uint8_t approveUid(const uint8_t *uid, const uint8_t *label, uint8_t dispType){
     online[regCount]=false; lastFrame[regCount]=0; lastSeen[regCount]=0; updateCount[regCount]=0;
     regCount++; saveReg();
     const char *dname = (dispType==DISP_42) ? "4.2\"" : "2.66\"";
-    Serial.printf("[enroll] %s -> 0x%02X (%s, auto)\n", hexBytes(label,4,0).c_str(), a, dname);
+    logf("[enroll] %s -> 0x%02X (%s, auto)\n", hexBytes(label,4,0).c_str(), a, dname);
     return a;
 }
 void handleReq(const uint8_t*uid,const uint8_t*label, uint8_t dispType){
     uint8_t a=approveUid(uid,label,dispType);
     if(a){ int idx=findAddr(a); replyAssign(reg[idx].uid,a); lastSeen[idx]=millis();
         if(!online[idx]){ online[idx]=true; wsPushTag(idx);
-            Serial.printf("[online] %s Addr 0x%02X\n", hexBytes(reg[idx].label,4,0).c_str(), a); } }
+            logf("[online] %s Addr 0x%02X\n", hexBytes(reg[idx].label,4,0).c_str(), a); } }
     else replyPending(uid);
 }
 
@@ -523,6 +547,25 @@ uint8_t scanBestChannel(String *report){
 void startServer(){
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *r){ r->send(200,"text/plain","OpenEPaperLink"); });
 
+    // Protokoll im Browser: /log = Live-Ansicht (auto-refresh), /logtxt = Rohtext.
+    server.on("/logtxt", HTTP_GET, [](AsyncWebServerRequest *r){
+        r->send(200, "text/plain; charset=utf-8", g_log);
+    });
+    server.on("/log", HTTP_GET, [](AsyncWebServerRequest *r){
+        r->send(200, "text/html; charset=utf-8",
+            "<!doctype html><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<title>PriceTag Log</title>"
+            "<style>body{background:#111;color:#0f0;font:12px/1.4 monospace;margin:0;padding:8px}"
+            "h3{color:#ccc;margin:4px 0}pre{white-space:pre-wrap;word-break:break-word}</style>"
+            "<h3>PriceTag Gateway - Protokoll (/log)</h3><pre id=o>lade...</pre>"
+            "<script>async function u(){try{let t=await(await fetch('/logtxt')).text();"
+            "let o=document.getElementById('o');"
+            "let atBottom=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-40;"
+            "o.textContent=t;if(atBottom)window.scrollTo(0,document.body.scrollHeight);}catch(e){}}"
+            "u();setInterval(u,1500);</script>");
+    });
+
     // Host-Konfig: ?poll=<sek>&ch=<1..125> (beide optional). Der Tag uebernimmt
     // die Werte bei seiner naechsten Poll-Antwort.
     server.on("/config", HTTP_GET, [](AsyncWebServerRequest *r){
@@ -594,7 +637,7 @@ void startServer(){
 
             uint8_t dt = reg[idx].disp;
             const char *dname = (dt==DISP_42) ? "4.2\"" : "2.66\"";
-            Serial.printf("[imgupload] %uB -> %s (%s) dither=%u, wartet auf Poll von 0x%02X\n",
+            logf("[imgupload] %uB -> %s (%s) dither=%u, wartet auf Poll von 0x%02X\n",
                           (unsigned)savedLen, dname, path.c_str(), dither, reg[idx].addr);
             tagImgPending[idx] = true;
             tagDither[idx] = dither;
@@ -610,7 +653,8 @@ void startServer(){
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
     server.begin();
-    Serial.println("[http] OEPL-AP-Shim laeuft auf Port 80 (/, /sysinfo, /get_db, /ws, /imgupload, /settype)");
+    Serial.println("[http] OEPL-AP-Shim laeuft auf Port 80 (/, /log, /sysinfo, /get_db, /ws, /imgupload, /settype)");
+    logf("[boot] Gateway bereit - Protokoll live unter http://%s.local/log\n", MDNS_NAME);
 }
 
 // ---------- setup / loop ----------
@@ -701,18 +745,38 @@ void loop(){
             else if(cmd==CMD_POLL){
                 uint8_t src=raw[0]; int idx=findAddr(src);
                 if(idx>=0){ lastSeen[idx]=millis();
-                    if(!online[idx]){ online[idx]=true; Serial.printf("[online] 0x%02X\n", src); }
+                    if(!online[idx]){ online[idx]=true; logf("[online] 0x%02X\n", src); wsPushTag(idx); }
                     if(tagImgPending[idx]){
-                        Serial.printf("[%lu] poll 0x%02X -> stream (Bild von HA)\n", millis(), src);
+                        logf("[%lu] poll 0x%02X -> stream (Bild von HA)\n", (unsigned long)millis(), src);
                         sendFrame(idx);
                         wsPushTag(idx);
                     } else {
                         // NOUPDATE traegt [sleep_hi][sleep_lo][channel]
                         uint8_t d[4]={CMD_NOUPDATE,(uint8_t)(g_pollInterval>>8),(uint8_t)g_pollInterval,g_advertChannel};
                         sendCmd(src,d,4);
-                        Serial.printf("[%lu] poll 0x%02X -> nix (poll=%us ch=%u)\n", millis(), src, g_pollInterval, g_advertChannel);
+                        logf("[%lu] poll 0x%02X -> nix (poll=%us ch=%u)\n", (unsigned long)millis(), src, g_pollInterval, g_advertChannel);
                     }
                     maybeSwitchChannel();   // nach der Antwort ggf. selbst auf den neuen Kanal
+                }
+            }
+        }
+    }
+
+    // Offline-Erkennung: meldet ins Log, wenn ein Tag ueber mehrere Poll-
+    // Intervalle nichts mehr schickt (z. B. haengt nach einem Refresh -> genau
+    // das Symptom beim 4,2"). Lauf alle 10 s, guenstig.
+    {
+        static uint32_t lastOfflineScan = 0;
+        if(millis() - lastOfflineScan > 10000){
+            lastOfflineScan = millis();
+            uint32_t limit = (uint32_t)g_pollInterval * 3000UL + 60000UL;  // 3x Intervall + 60 s
+            for(uint8_t i=0;i<regCount;i++){
+                if(online[i] && lastSeen[i] && millis()-lastSeen[i] > limit){
+                    online[i]=false;
+                    logf("[offline] 0x%02X (%s) seit %lus kein Poll -> haengt?\n",
+                         reg[i].addr, hexBytes(reg[i].label,4,0).c_str(),
+                         (unsigned long)((millis()-lastSeen[i])/1000));
+                    wsPushTag(i);
                 }
             }
         }
