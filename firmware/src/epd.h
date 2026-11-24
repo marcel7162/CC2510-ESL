@@ -3,7 +3,12 @@
 
 #include <stdint.h>
 
-#ifdef PANEL_42
+#if defined(PANEL_97)
+/* 9.7" Pervasive E2969JS08 (Spectra BWR, dual COG master/slave), landscape */
+#define SCR_W 960
+#define SCR_H 672
+#define PANEL_TYPE 2
+#elif defined(PANEL_42)
 #define SCR_W 400
 #define SCR_H 300
 #define PANEL_TYPE 1
@@ -24,7 +29,11 @@ void epd_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint8_t color);
 void epd_text(uint16_t x, uint16_t y, const char *s, uint8_t color, uint8_t scale);
 void epd_icon(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
               const uint8_t __code *bmp, uint8_t color);
+#ifdef PANEL_97
+void epd_update(void) __reentrant;   /* locals on the stack: DATA is full */
+#else
 void epd_update(void);
+#endif
 void epd_sleep(void);
 
 /* Full-frame streaming: begin, feed RLE token bytes ([runlen][value] pairs)
@@ -34,5 +43,9 @@ void epd_img_begin(void);
 void epd_img_rle(const uint8_t *buf, uint8_t n);
 uint8_t epd_img_complete(void);   /* 1 = both planes fully streamed */
 void epd_img_show(void);
+
+#ifdef PANEL_97
+uint8_t epd_otp_ok(void);   /* 1 = COG OTP read OK (else no refresh at all) */
+#endif
 
 #endif

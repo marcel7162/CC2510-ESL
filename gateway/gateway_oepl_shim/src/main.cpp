@@ -11,6 +11,7 @@
  * Unterstuetzte Displays (parallel, per Tag):
  *   - 2.66" 296x152 BWR (IL0373, hwType 0x56)
  *   - 4.2"  400x300 BWR (IL0398, hwType 0x02)
+ *   - 9.7"  960x672 BWR (Pervasive E2969JS08, Dual-COG, hwType 0x2E)
  *
  * Der Funk-/Enroll-/Stream-Code ist 1:1 aus gateway_weather_pio uebernommen.
  * Neu ist nur das Frontend (statt Open-Meteo + Adafruit GFX): ein HTTP/WS-
@@ -31,6 +32,7 @@
 #include <ESPAsyncWebServer.h>
 #include <TJpg_Decoder.h>
 #include <LittleFS.h>
+#include <esp_heap_caps.h>
 #include "credentials.h"
 
 // ===================== CONFIG =====================
@@ -52,10 +54,13 @@ IPAddress STATIC_DNS(192,168,137,1);
 // Display-Typen: der Tag meldet seinen Typ beim Enroll (panel_type Byte).
 #define DISP_266  0    // 2.66" 296x152 BWR (IL0373)
 #define DISP_42   1    // 4.2"  400x300 BWR (IL0398)
+#define DISP_97   2    // 9.7"  960x672 BWR (Pervasive E2969JS08, 2 COGs)
+#define DISP_COUNT 3
 
 // OEPL-hwType pro Display-Typ (steuert welche Aufloesung HA rendert)
 #define HW_TYPE_266 0x56   // "HS BWR 2.66"" 296x152
 #define HW_TYPE_42  0x02   // "M2 4.2"" 400x300 (OEPL-Fallback-Dict)
+#define HW_TYPE_97  0x2E   // "M3 9.7"" 960x672 BWR (OEPL tagtypes/2E.json)
 
 // Dimensionen pro Display-Typ
 #define SCR_W_266  296
@@ -67,6 +72,23 @@ IPAddress STATIC_DNS(192,168,137,1);
 #define SCR_H_42   300
 #define HBYTES_42  50
 #define PLANE_42   15000   // 300 * 50
+
+// 9.7": zwei Controller (Master = linke, Slave = rechte Haelfte). Jede Ebene
+// liegt im Speicher als [linke Haelfte 672x60 B][rechte Haelfte 672x60 B],
+// gestreamt wird in COG-Reihenfolge: M-schwarz, M-rot, S-schwarz, S-rot.
+#define SCR_W_97   960
+#define SCR_H_97   672
+#define HBYTES_97  60       // pro Haelfte (480 px)
+#define HALF_97    40320    // 672 * 60
+#define PLANE_97   80640    // 2 Haelften
+
+struct DispGeo { uint16_t w, h; uint8_t hbytes; int plane; uint8_t hwType; const char *name; };
+static const DispGeo GEO[DISP_COUNT] = {
+    { SCR_W_266, SCR_H_266, HBYTES_266, PLANE_266, HW_TYPE_266, "2.66\"" },
+    { SCR_W_42,  SCR_H_42,  HBYTES_42,  PLANE_42,  HW_TYPE_42,  "4.2\""  },
+    { SCR_W_97,  SCR_H_97,  HBYTES_97,  PLANE_97,  HW_TYPE_97,  "9.7\""  },
+};
+static inline const DispGeo &geo(uint8_t d){ return GEO[d < DISP_COUNT ? d : DISP_266]; }
 
 // WS2812 Status-LED (ESP32-S3-Zero onboard)
 #define LED_PIN 21
@@ -89,7 +111,6 @@ static void led(uint8_t r, uint8_t g, uint8_t b){ neopixelWrite(LED_PIN, r, g, b
 #define CMD_POLL           0x23
 #define CMD_NOUPDATE       0x24
 
-#define PLANE_MAX PLANE_42
 #define IMG_CHUNK 12
 
 const uint8_t txAddr[5] = {0xA7, 0x5C, 0xA7, 0xAA, 0xAA};
@@ -100,14 +121,37 @@ Preferences prefs;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
-// Shared Decode-Buffer: nur ein Tag wird gleichzeitig dekodiert/gestreamt.
-// JPEGs liegen auf LittleFS (/img/<mac>.jpg), nicht im RAM.
-static uint8_t planeBW[PLANE_MAX];
-static uint8_t planeRD[PLANE_MAX];
-static uint8_t tokens[48000];
+// Decode-Buffer: nur ein Tag wird gleichzeitig dekodiert/gestreamt. Die
+// Ebenen werden pro Stream auf dem Heap angelegt (9.7" = 2 x 80 KB; PSRAM
+// wird bevorzugt, falls vorhanden) und danach wieder freigegeben. RLE wird
+// waehrend des Sendens erzeugt -> kein Token-Puffer noetig.
+// JPEGs liegen auf LittleFS (/img/<mac>.jpg) und werden direkt von dort
+// dekodiert -> auch kein JPEG-Puffer im RAM.
+static uint8_t *planeBW = nullptr;
+static uint8_t *planeRD = nullptr;
 
-// Upload-Puffer: empfaengt das JPEG von HA, wird dann auf FS geschrieben.
-static uint8_t jpgBuf[48000];
+static void freePlanes(){
+    if(planeBW){ free(planeBW); planeBW=nullptr; }
+    if(planeRD){ free(planeRD); planeRD=nullptr; }
+}
+static bool allocPlanes(int size){
+    freePlanes();
+    planeBW = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!planeBW) planeBW = (uint8_t*)malloc(size);
+    planeRD = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!planeRD) planeRD = (uint8_t*)malloc(size);
+    if(!planeBW || !planeRD){
+        Serial.printf("[mem] %d B Ebenen nicht allokierbar (frei: %u)\n", 2*size, (unsigned)ESP.getFreeHeap());
+        freePlanes();
+        return false;
+    }
+    return true;
+}
+
+// Upload: JPEG von HA wird direkt in eine Temp-Datei geschrieben (mac ist
+// erst im onRequest-Callback sicher bekannt) und dann umbenannt.
+#define UPLOAD_TMP "/img/_upload.tmp"
+static File uploadFile;
 static volatile size_t jpgLen = 0;
 
 // JPEG-Decode-Kontext (Geometrie + Dithering des aktuell dekodierten Displays)
@@ -162,7 +206,7 @@ void sendCmd(uint8_t dest, const uint8_t *d, uint8_t n);
 void replyAssign(const uint8_t *u, uint8_t a);
 void replyPending(const uint8_t *u);
 int rleEncode(const uint8_t *data, int len, uint8_t *out, int cap);
-bool streamImage(uint8_t addr, int planeSize);
+bool streamImage(uint8_t addr, uint8_t dt);
 void sendFrame(uint8_t idx);
 void handleReq(const uint8_t *uid, const uint8_t *label, uint8_t dispType);
 uint8_t approveUid(const uint8_t *uid, const uint8_t *label, uint8_t dispType);
@@ -264,14 +308,54 @@ int rleEncode(const uint8_t* data, int len, uint8_t* out, int cap) {
     return o;
 }
 
-bool streamImage(uint8_t addr, int planeSize) {
-    int o = rleEncode(planeBW, planeSize, tokens, sizeof(tokens));
-    int o2 = (o>=0) ? rleEncode(planeRD, planeSize, tokens+o, sizeof(tokens)-o) : -1;
-    if (o<0 || o2<0) { Serial.println("RLE overflow!"); return false; }
-    int total = o + o2;
+// Byte-Strom in Funk-Reihenfolge als Segmentliste (RLE laeuft ueber die
+// Segmentgrenzen hinweg; der Tag zaehlt nur Bytes).
+struct StreamSrc {
+    const uint8_t *p[4]; int n[4]; int nseg;
+    int seg, pos;
+    void reset(){ seg=0; pos=0; }
+    bool get(uint8_t &v){
+        while(seg<nseg && pos>=n[seg]){ seg++; pos=0; }
+        if(seg>=nseg) return false;
+        v=p[seg][pos++]; return true;
+    }
+    bool peek(uint8_t &v){
+        int sg=seg, ps=pos;
+        while(sg<nseg && ps>=n[sg]){ sg++; ps=0; }
+        if(sg>=nseg) return false;
+        v=p[sg][ps]; return true;
+    }
+};
+static void buildStreamSrc(StreamSrc &src, uint8_t dt){
+    if(dt==DISP_97){
+        src.p[0]=planeBW;          src.n[0]=HALF_97;   // Master schwarz
+        src.p[1]=planeRD;          src.n[1]=HALF_97;   // Master rot
+        src.p[2]=planeBW+HALF_97;  src.n[2]=HALF_97;   // Slave schwarz
+        src.p[3]=planeRD+HALF_97;  src.n[3]=HALF_97;   // Slave rot
+        src.nseg=4;
+    } else {
+        int ps=geo(dt).plane;
+        src.p[0]=planeBW; src.n[0]=ps;
+        src.p[1]=planeRD; src.n[1]=ps;
+        src.nseg=2;
+    }
+    src.reset();
+}
+// Naechstes RLE-Token-Paar [run][value]; false am Ende.
+static bool rleNext(StreamSrc &src, uint8_t &run, uint8_t &val){
+    if(!src.get(val)) return false;
+    run=1; uint8_t nx;
+    while(run<255 && src.peek(nx) && nx==val){ src.get(nx); run++; }
+    return true;
+}
+
+bool streamImage(uint8_t addr, uint8_t dt) {
+    StreamSrc src; buildStreamSrc(src, dt);
+    int total=0; { uint8_t r,v; while(rleNext(src,r,v)) total+=2; }
+    src.reset();
     streamReTx = 0;
-    Serial.printf("  BW=%d RD=%d total=%d RLE-Bytes, ~%d DATA-Pakete\n",
-                  o, o2, total, (total + IMG_CHUNK - 1) / IMG_CHUNK);
+    Serial.printf("  %s: total=%d RLE-Bytes, ~%d DATA-Pakete\n",
+                  geo(dt).name, total, (total + IMG_CHUNK - 1) / IMG_CHUNK);
 
     uint8_t d[2+IMG_CHUNK]; uint8_t s;
     s = ++txSeq; d[0] = CMD_IMG_BEGIN; d[1] = s;
@@ -281,9 +365,9 @@ bool streamImage(uint8_t addr, int planeSize) {
 
     int sent=0;
     for (int i=0;i<total; ) {
-        int chunk = min(IMG_CHUNK, total-i);
+        int chunk=0; uint8_t r,v;
+        while(chunk+2<=IMG_CHUNK && rleNext(src,r,v)){ d[2+chunk++]=r; d[2+chunk++]=v; }
         s = ++txSeq; d[0]=CMD_IMG_DATA; d[1]=s;
-        memcpy(&d[2], &tokens[i], chunk);
         if (!sendReliable(addr, d, 2+chunk, 80, 120, s)) {
             Serial.printf("  DATA kein ACK @%d (seq=%d/%d, %d ReTx) -> Abbruch\n", i, s, total, streamReTx);
             return false;
@@ -293,7 +377,9 @@ bool streamImage(uint8_t addr, int planeSize) {
 
     s = ++txSeq; d[0]=CMD_IMG_SHOW; d[1]=s;
     d[2]=(uint8_t)(g_pollInterval>>8); d[3]=(uint8_t)g_pollInterval; d[4]=g_advertChannel;
-    bool ok = sendReliable(addr, d, 5, 60000, 3, s);   // + sleep(2) + channel(1)
+    // Tag ACKt SHOW erst nach dem Refresh (9.7" Spectra: Soft-Start + ~40 s)
+    uint32_t showTo = (dt==DISP_97) ? 150000 : 60000;
+    bool ok = sendReliable(addr, d, 5, showTo, 3, s);   // + sleep(2) + channel(1)
     Serial.printf("  stream %d RLE-Bytes in %d Paketen, %d ReTx, refresh %s\n",
                   total, sent, streamReTx, ok?"OK":"FAIL");
     return ok;
@@ -307,31 +393,27 @@ String imgPath(uint8_t idx){ return "/img/" + tagMacStr(idx) + ".jpg"; }
 // JPEG von LittleFS laden + dekodieren in planeBW/planeRD. true bei Erfolg.
 bool decodeTagImage(uint8_t idx){
     String path = imgPath(idx);
-    File f = LittleFS.open(path, "r");
-    if(!f){ Serial.printf("[img] %s nicht gefunden\n", path.c_str()); return false; }
-    size_t sz = f.size();
-    if(sz > sizeof(jpgBuf)){ Serial.printf("[img] %s zu gross (%u)\n", path.c_str(), (unsigned)sz); f.close(); return false; }
-    f.read(jpgBuf, sz); f.close();
+    if(!LittleFS.exists(path)){ Serial.printf("[img] %s nicht gefunden\n", path.c_str()); return false; }
 
     uint8_t dt = reg[idx].disp;
+    const DispGeo &g = geo(dt);
     g_decDisp   = dt;
     g_decDither = tagDither[idx];
-    g_decScrW   = (dt == DISP_42) ? SCR_W_42  : SCR_W_266;
-    g_decScrH   = (dt == DISP_42) ? SCR_H_42  : SCR_H_266;
-    g_decHbytes = (dt == DISP_42) ? HBYTES_42  : HBYTES_266;
-    int planeSize = (dt == DISP_42) ? PLANE_42 : PLANE_266;
+    g_decScrW   = g.w;
+    g_decScrH   = g.h;
+    g_decHbytes = g.hbytes;
 
-    memset(planeBW,0xFF,planeSize); memset(planeRD,0xFF,planeSize);
+    if(!allocPlanes(g.plane)) return false;
+    memset(planeBW,0xFF,g.plane); memset(planeRD,0xFF,g.plane);
     TJpgDec.setJpgScale(1);
     TJpgDec.setCallback(jpgOutput);
-    JRESULT jr = TJpgDec.drawJpg(0,0, jpgBuf, sz);
-    if(jr!=JDR_OK){ Serial.printf("[img] Decode %s fehlgeschlagen (%d)\n", path.c_str(), jr); return false; }
+    JRESULT jr = TJpgDec.drawFsJpg(0, 0, path.c_str(), LittleFS);
+    if(jr!=JDR_OK){ Serial.printf("[img] Decode %s fehlgeschlagen (%d)\n", path.c_str(), jr); freePlanes(); return false; }
     return true;
 }
 
 void sendFrame(uint8_t idx){
     uint8_t dt = reg[idx].disp;
-    int ps = (dt == DISP_42) ? PLANE_42 : PLANE_266;
 
     if(!decodeTagImage(idx)) return;
 
@@ -339,7 +421,8 @@ void sendFrame(uint8_t idx){
     bool wasOn = (WiFi.getMode()!=WIFI_OFF);
     if(wasOn){ WiFi.mode(WIFI_OFF); delay(50); }
     Serial.printf("[%lu] stream -> 0x%02X (WLAN aus fuer Stream)\n", millis(), reg[idx].addr);
-    bool ok = streamImage(reg[idx].addr, ps);
+    bool ok = streamImage(reg[idx].addr, dt);
+    freePlanes();
     lastFrame[idx]=millis();
     if(ok){
         updateCount[idx]++;
@@ -365,7 +448,7 @@ uint8_t approveUid(const uint8_t *uid, const uint8_t *label, uint8_t dispType){
     reg[regCount].disp=dispType;
     online[regCount]=false; lastFrame[regCount]=0; lastSeen[regCount]=0; updateCount[regCount]=0;
     regCount++; saveReg();
-    const char *dname = (dispType==DISP_42) ? "4.2\"" : "2.66\"";
+    const char *dname = geo(dispType).name;
     Serial.printf("[enroll] %s -> 0x%02X (%s, auto)\n", hexBytes(label,4,0).c_str(), a, dname);
     return a;
 }
@@ -411,7 +494,13 @@ bool jpgOutput(int16_t bx, int16_t by, uint16_t w, uint16_t h, uint16_t *bmp){
             uint8_t b = (px&0x1F)<<3;
 
             int idx; uint8_t mask;
-            if (g_decDisp == DISP_42) {
+            if (g_decDisp == DISP_97) {
+                // linke Haelfte -> Master-COG, rechte -> Slave-COG
+                int half = (X >= SCR_W_97/2) ? 1 : 0;
+                int xx = X - half * (SCR_W_97/2);
+                idx = half * HALF_97 + Y * HBYTES_97 + (xx >> 3);
+                mask = 0x80 >> (xx & 7);
+            } else if (g_decDisp == DISP_42) {
                 idx = Y * g_decHbytes + (X >> 3);
                 mask = 0x80 >> (X & 7);
             } else {
@@ -439,7 +528,7 @@ String buildTagJson(uint8_t idx){
     String s = "{";
     s += "\"mac\":\"" + tagMacStr(idx) + "\",";
     s += "\"alias\":\"" + hexBytes(reg[idx].label,4,0) + "\",";
-    uint8_t hwt = (reg[idx].disp == DISP_42) ? HW_TYPE_42 : HW_TYPE_266;
+    uint8_t hwt = geo(reg[idx].disp).hwType;
     s += "\"hwType\":" + String(hwt) + ",";
     s += "\"RSSI\":" + String(((int8_t)lastRssi)/2 - 71) + ",";
     s += "\"LQI\":" + String(lastLqi & 0x7F) + ",";
@@ -547,13 +636,13 @@ void startServer(){
     // Display-Typ eines Tags manuell setzen: /settype?mac=XX&type=42 oder type=266
     server.on("/settype", HTTP_GET, [](AsyncWebServerRequest *r){
         if(!r->hasParam("mac") || !r->hasParam("type")){
-            r->send(400,"text/plain","need ?mac=...&type=266|42"); return; }
+            r->send(400,"text/plain","need ?mac=...&type=266|42|97"); return; }
         int idx = findByMac(r->getParam("mac")->value());
         if(idx<0){ r->send(404,"text/plain","unknown mac"); return; }
         String t = r->getParam("type")->value();
-        uint8_t dt = (t=="42") ? DISP_42 : DISP_266;
+        uint8_t dt = (t=="97") ? DISP_97 : (t=="42") ? DISP_42 : DISP_266;
         reg[idx].disp = dt;  saveReg();
-        const char *dname = (dt==DISP_42) ? "4.2\"" : "2.66\"";
+        const char *dname = geo(dt).name;
         Serial.printf("[settype] %s -> %s\n", tagMacStr(idx).c_str(), dname);
         r->send(200,"application/json","{\"mac\":\""+tagMacStr(idx)+"\",\"disp\":\""+dname+"\"}");
         wsPushTag(idx);
@@ -580,20 +669,21 @@ void startServer(){
             String mac = r->hasParam("mac", true) ? r->getParam("mac", true)->value() : "";
             int idx = findByMac(mac);
             Serial.printf("[imgupload] mac=%s len=%u idx=%d\n", mac.c_str(), (unsigned)jpgLen, idx);
-            if(idx<0 || jpgLen==0){ r->send(404,"text/plain","unknown mac / no image"); jpgLen=0; return; }
+            if(uploadFile) uploadFile.close();
+            if(idx<0 || jpgLen==0){ LittleFS.remove(UPLOAD_TMP); r->send(404,"text/plain","unknown mac / no image"); jpgLen=0; return; }
 
             uint8_t dither = r->hasParam("dither", true) ? r->getParam("dither", true)->value().toInt() : 0;
 
             led(0,15,20);  // cyan: Bild empfangen
             String path = imgPath(idx);
             size_t savedLen = jpgLen;
-            { File f = LittleFS.open(path, "w");
-              if(!f){ Serial.println("[imgupload] FS write failed"); r->send(500,"text/plain","fs error"); jpgLen=0; return; }
-              f.write(jpgBuf, jpgLen); f.close(); }
+            LittleFS.remove(path);
+            if(!LittleFS.rename(UPLOAD_TMP, path)){
+                Serial.println("[imgupload] FS rename failed"); r->send(500,"text/plain","fs error"); jpgLen=0; return; }
             jpgLen=0;
 
             uint8_t dt = reg[idx].disp;
-            const char *dname = (dt==DISP_42) ? "4.2\"" : "2.66\"";
+            const char *dname = geo(dt).name;
             Serial.printf("[imgupload] %uB -> %s (%s) dither=%u, wartet auf Poll von 0x%02X\n",
                           (unsigned)savedLen, dname, path.c_str(), dither, reg[idx].addr);
             tagImgPending[idx] = true;
@@ -603,8 +693,13 @@ void startServer(){
         },
         [](AsyncWebServerRequest *r, String filename, size_t index, uint8_t *data, size_t len, bool final){
             // onUpload: Bilddaten (Feld 'image') einsammeln.
-            if(index==0) jpgLen=0;
-            if(jpgLen + len <= sizeof(jpgBuf)){ memcpy(jpgBuf+jpgLen, data, len); jpgLen += len; }
+            if(index==0){
+                jpgLen=0;
+                if(uploadFile) uploadFile.close();
+                uploadFile = LittleFS.open(UPLOAD_TMP, "w");
+            }
+            if(uploadFile && len) jpgLen += uploadFile.write(data, len);
+            if(final && uploadFile) uploadFile.close();
         });
 
     ws.onEvent(onWsEvent);
@@ -654,7 +749,7 @@ void setup(){
     prefs.begin("pricetag",false); loadReg();
     Serial.printf("Registry: %u Tag(s)\n", regCount);
     for(uint8_t i=0;i<regCount;i++){
-        const char *dname = (reg[i].disp==DISP_42) ? "4.2\"" : "2.66\"";
+        const char *dname = geo(reg[i].disp).name;
         Serial.printf("  0x%02X  mac=%s  label=%s  disp=%s\n", reg[i].addr, tagMacStr(i).c_str(), hexBytes(reg[i].label,4,0).c_str(), dname);
     }
 
@@ -695,7 +790,7 @@ void loop(){
             uint8_t cmd=raw[2];
             g_lastTagContact=millis();
             if(cmd==CMD_ENROLL_REQ && len>=12){
-                uint8_t ptype = (len >= 13) ? raw[14] : DISP_266;
+                uint8_t ptype = (len >= 13 && raw[14] < DISP_COUNT) ? raw[14] : DISP_266;
                 handleReq(&raw[3],&raw[10], ptype);
             }
             else if(cmd==CMD_POLL){

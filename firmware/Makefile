@@ -47,6 +47,8 @@ display: display.bin
 
 display42: display42.bin
 
+display97: display97.bin
+
 nfc-scan: nfc_scan.bin
 
 nfc-uid: nfc_uid.bin
@@ -91,6 +93,18 @@ RELS_DISPLAY42 = src/main_display_42.rel src/epd_42.rel src/radio.rel src/nfc.re
 display42.ihx: $(RELS_DISPLAY42)
 	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_DISPLAY42)
 
+# 9.7" panel variant (Pervasive E2969JS08, dual COG): -DPANEL_97
+src/epd_97.rel: src/epd.c
+	$(CC) -c $(CFLAGS) -DPANEL_97 -o $@ $<
+
+src/main_display_97.rel: src/main_display.c
+	$(CC) -c $(CFLAGS) -DPANEL_97 -o $@ $<
+
+RELS_DISPLAY97 = src/main_display_97.rel src/epd_97.rel src/radio.rel src/nfc.rel
+
+display97.ihx: $(RELS_DISPLAY97)
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_DISPLAY97)
+
 nfc_scan.ihx: $(RELS_NFC_SCAN)
 	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_NFC_SCAN)
 
@@ -119,4 +133,4 @@ clean:
 	rm -f src/*.rel src/*.asm src/*.lst src/*.sym src/*.rst
 	rm -f *.ihx *.bin *.lk *.map *.mem
 
-.PHONY: all radio-tx radio-rx radio-loopback display display42 nfc-scan nfc-uid nfc-test nfc-dump enroll flash-test cobs-test clean
+.PHONY: all radio-tx radio-rx radio-loopback display display42 display97 nfc-scan nfc-uid nfc-test nfc-dump enroll flash-test cobs-test clean
