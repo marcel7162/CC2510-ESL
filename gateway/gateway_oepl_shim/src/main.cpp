@@ -11,6 +11,7 @@
  * Unterstuetzte Displays (parallel, per Tag):
  *   - 2.66" 296x152 BWR (IL0373, hwType 0x56)
  *   - 4.2"  400x300 BWR (IL0398, hwType 0x02)
+ *   - 9.7"  960x672 BWR (Pervasive E2969JS08, Dual-COG, hwType 0x2E)
  *
  * Der Funk-/Enroll-/Stream-Code ist 1:1 aus gateway_weather_pio uebernommen.
  * Neu ist nur das Frontend (statt Open-Meteo + Adafruit GFX): ein HTTP/WS-
@@ -26,11 +27,13 @@
 #include <RF24.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <ESPmDNS.h>
 #include <time.h>
 #include <ESPAsyncWebServer.h>
 #include <TJpg_Decoder.h>
 #include <LittleFS.h>
+#include <esp_heap_caps.h>
 #include "credentials.h"
 
 // ===================== CONFIG =====================
@@ -52,10 +55,13 @@ IPAddress STATIC_DNS(192,168,137,1);
 // Display-Typen: der Tag meldet seinen Typ beim Enroll (panel_type Byte).
 #define DISP_266  0    // 2.66" 296x152 BWR (IL0373)
 #define DISP_42   1    // 4.2"  400x300 BWR (IL0398)
+#define DISP_97   2    // 9.7"  960x672 BWR (Pervasive E2969JS08, 2 COGs)
+#define DISP_COUNT 3
 
 // OEPL-hwType pro Display-Typ (steuert welche Aufloesung HA rendert)
 #define HW_TYPE_266 0x56   // "HS BWR 2.66"" 296x152
 #define HW_TYPE_42  0x02   // "M2 4.2"" 400x300 (OEPL-Fallback-Dict)
+#define HW_TYPE_97  0x2E   // "M3 9.7"" 960x672 BWR (OEPL tagtypes/2E.json)
 
 // Dimensionen pro Display-Typ
 #define SCR_W_266  296
@@ -67,6 +73,23 @@ IPAddress STATIC_DNS(192,168,137,1);
 #define SCR_H_42   300
 #define HBYTES_42  50
 #define PLANE_42   15000   // 300 * 50
+
+// 9.7": zwei Controller (Master = LINKE, Slave = RECHTE Haelfte). Jede Ebene
+// liegt im Speicher als [linke Haelfte 672x60 B][rechte Haelfte 672x60 B],
+// gestreamt wird in COG-Reihenfolge: M-schwarz, M-rot, S-schwarz, S-rot.
+#define SCR_W_97   960
+#define SCR_H_97   672
+#define HBYTES_97  60       // pro Haelfte (480 px)
+#define HALF_97    40320    // 672 * 60
+#define PLANE_97   80640    // 2 Haelften
+
+struct DispGeo { uint16_t w, h; uint8_t hbytes; int plane; uint8_t hwType; const char *name; };
+static const DispGeo GEO[DISP_COUNT] = {
+    { SCR_W_266, SCR_H_266, HBYTES_266, PLANE_266, HW_TYPE_266, "2.66\"" },
+    { SCR_W_42,  SCR_H_42,  HBYTES_42,  PLANE_42,  HW_TYPE_42,  "4.2\""  },
+    { SCR_W_97,  SCR_H_97,  HBYTES_97,  PLANE_97,  HW_TYPE_97,  "9.7\""  },
+};
+static inline const DispGeo &geo(uint8_t d){ return GEO[d < DISP_COUNT ? d : DISP_266]; }
 
 // WS2812 Status-LED (ESP32-S3-Zero onboard)
 #define LED_PIN 21
@@ -89,8 +112,7 @@ static void led(uint8_t r, uint8_t g, uint8_t b){ neopixelWrite(LED_PIN, r, g, b
 #define CMD_POLL           0x23
 #define CMD_NOUPDATE       0x24
 
-#define PLANE_MAX PLANE_42
-#define IMG_CHUNK 12
+#define IMG_CHUNK 27
 
 const uint8_t txAddr[5] = {0xA7, 0x5C, 0xA7, 0xAA, 0xAA};
 const uint8_t rxAddr[3] = {0xA7, 0x5C, 0xA7};
@@ -99,15 +121,60 @@ RF24 radio(CE_PIN, CSN_PIN);
 Preferences prefs;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+AsyncWebSocket wsLog("/log");
 
-// Shared Decode-Buffer: nur ein Tag wird gleichzeitig dekodiert/gestreamt.
-// JPEGs liegen auf LittleFS (/img/<mac>.jpg), nicht im RAM.
-static uint8_t planeBW[PLANE_MAX];
-static uint8_t planeRD[PLANE_MAX];
-static uint8_t tokens[48000];
+// Print-Tee: schreibt auf Serial UND pusht zeilenweise an /log-WebSocket-Clients.
+class LogPrint : public Print {
+    char buf[256];
+    uint8_t pos = 0;
+    void flush() {
+        if(!pos) return;
+        buf[pos] = 0;
+        if(wsLog.count()) wsLog.textAll(buf, pos);
+        pos = 0;
+    }
+public:
+    size_t write(uint8_t c) override {
+        Serial.write(c);
+        if(c == '\n' || pos >= sizeof(buf)-1) { buf[pos++]=c; flush(); }
+        else buf[pos++] = c;
+        return 1;
+    }
+    size_t write(const uint8_t *d, size_t n) override {
+        for(size_t i=0;i<n;i++) write(d[i]);
+        return n;
+    }
+};
+LogPrint Log;
 
-// Upload-Puffer: empfaengt das JPEG von HA, wird dann auf FS geschrieben.
-static uint8_t jpgBuf[48000];
+// Decode-Buffer: Ebenen werden pro Encode auf dem Heap angelegt (9.7" = 2 x 80 KB;
+// PSRAM wird bevorzugt, falls vorhanden) und danach wieder freigegeben.
+// Vorkodierte RLE-Daten liegen auf LittleFS (/img/<mac>.bin).
+static uint8_t *planeBW = nullptr;
+static uint8_t *planeRD = nullptr;
+
+static void freePlanes(){
+    if(planeBW){ free(planeBW); planeBW=nullptr; }
+    if(planeRD){ free(planeRD); planeRD=nullptr; }
+}
+static bool allocPlanes(int size){
+    freePlanes();
+    planeBW = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!planeBW) planeBW = (uint8_t*)malloc(size);
+    planeRD = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!planeRD) planeRD = (uint8_t*)malloc(size);
+    if(!planeBW || !planeRD){
+        Log.printf("[mem] %d B Ebenen nicht allokierbar (frei: %u)\n", 2*size, (unsigned)ESP.getFreeHeap());
+        freePlanes();
+        return false;
+    }
+    return true;
+}
+
+// Upload: JPEG von HA wird direkt in eine Temp-Datei geschrieben (mac ist
+// erst im onRequest-Callback sicher bekannt) und dann umbenannt.
+#define UPLOAD_TMP "/img/_upload.tmp"
+static File uploadFile;
 static volatile size_t jpgLen = 0;
 
 // JPEG-Decode-Kontext (Geometrie + Dithering des aktuell dekodierten Displays)
@@ -116,6 +183,7 @@ static uint8_t  g_decDither = 0;
 static uint16_t g_decScrW   = SCR_W_266;
 static uint16_t g_decScrH   = SCR_H_266;
 static uint8_t  g_decHbytes = HBYTES_266;
+static int8_t   g_decHalf   = -1;         // 9.7" two-pass: 0=left, 1=right, -1=both
 
 #define MAX_ENTRIES 16
 struct Entry { uint8_t uid[7]; uint8_t addr; uint8_t label[4]; uint8_t disp; };
@@ -162,7 +230,8 @@ void sendCmd(uint8_t dest, const uint8_t *d, uint8_t n);
 void replyAssign(const uint8_t *u, uint8_t a);
 void replyPending(const uint8_t *u);
 int rleEncode(const uint8_t *data, int len, uint8_t *out, int cap);
-bool streamImage(uint8_t addr, int planeSize);
+bool streamImage(uint8_t addr, const uint8_t *tokens, int total, uint8_t dt);
+bool encodeAndStore(uint8_t idx);
 void sendFrame(uint8_t idx);
 void handleReq(const uint8_t *uid, const uint8_t *label, uint8_t dispType);
 uint8_t approveUid(const uint8_t *uid, const uint8_t *label, uint8_t dispType);
@@ -205,7 +274,7 @@ void loadReg(){
         }
         regCount = old_count;
         saveReg();
-        Serial.printf("[nvs] %u Eintraege von 12->13 Byte migriert\n", old_count);
+        Log.printf("[nvs] %u Eintraege von 12->13 Byte migriert\n", old_count);
     } else {
         regCount = n / sizeof(Entry);
     }
@@ -264,19 +333,118 @@ int rleEncode(const uint8_t* data, int len, uint8_t* out, int cap) {
     return o;
 }
 
-bool streamImage(uint8_t addr, int planeSize) {
-    int o = rleEncode(planeBW, planeSize, tokens, sizeof(tokens));
-    int o2 = (o>=0) ? rleEncode(planeRD, planeSize, tokens+o, sizeof(tokens)-o) : -1;
-    if (o<0 || o2<0) { Serial.println("RLE overflow!"); return false; }
-    int total = o + o2;
+// Byte-Strom in Funk-Reihenfolge als Segmentliste (RLE laeuft ueber die
+// Segmentgrenzen hinweg; der Tag zaehlt nur Bytes).
+struct StreamSrc {
+    const uint8_t *p[4]; int n[4]; int nseg;
+    int seg, pos;
+    void reset(){ seg=0; pos=0; }
+    bool get(uint8_t &v){
+        while(seg<nseg && pos>=n[seg]){ seg++; pos=0; }
+        if(seg>=nseg) return false;
+        v=p[seg][pos++]; return true;
+    }
+    bool peek(uint8_t &v){
+        int sg=seg, ps=pos;
+        while(sg<nseg && ps>=n[sg]){ sg++; ps=0; }
+        if(sg>=nseg) return false;
+        v=p[sg][ps]; return true;
+    }
+};
+static void buildStreamSrc(StreamSrc &src, uint8_t dt){
+    if(dt==DISP_97){
+        src.p[0]=planeBW;          src.n[0]=HALF_97;   // Master schwarz (linke Haelfte)
+        src.p[1]=planeRD;          src.n[1]=HALF_97;   // Master rot    (linke Haelfte)
+        src.p[2]=planeBW+HALF_97;  src.n[2]=HALF_97;   // Slave schwarz (rechte Haelfte)
+        src.p[3]=planeRD+HALF_97;  src.n[3]=HALF_97;   // Slave rot     (rechte Haelfte)
+        src.nseg=4;
+    } else {
+        int ps=geo(dt).plane;
+        src.p[0]=planeBW; src.n[0]=ps;
+        src.p[1]=planeRD; src.n[1]=ps;
+        src.nseg=2;
+    }
+    src.reset();
+}
+// Naechstes RLE-Token-Paar [run][value]; false am Ende.
+static bool rleNext(StreamSrc &src, uint8_t &run, uint8_t &val){
+    if(!src.get(val)) return false;
+    run=1; uint8_t nx;
+    while(run<255 && src.peek(nx) && nx==val){ src.get(nx); run++; }
+    return true;
+}
+
+// WLAN waehrend des Funk-Streams aus (stoert sonst den nRF24 massiv, s. Mess-
+// werte im Wetter-Gateway). Danach Reconnect im Hintergrund.
+// RLE-Pfad fuer einen Tag: /img/<mac>.bin
+String imgPath(uint8_t idx){ return "/img/" + tagMacStr(idx) + ".bin"; }
+
+// JPEG aus FS dekodieren, RLE-kodieren (in COG-Reihenfolge), als .bin speichern.
+// Wird einmalig beim Upload aufgerufen, nicht beim Senden.
+bool encodeAndStore(uint8_t idx){
+    String jpgPath = "/img/" + tagMacStr(idx) + ".jpg";
+    uint8_t dt = reg[idx].disp;
+    const DispGeo &g = geo(dt);
+    g_decDisp   = dt;
+    g_decDither = tagDither[idx];
+    g_decScrW   = g.w;
+    g_decScrH   = g.h;
+    g_decHbytes = g.hbytes;
+
+    TJpgDec.setJpgScale(1);
+    TJpgDec.setCallback(jpgOutput);
+    String binPath = imgPath(idx);
+    int total = 0;
+
+    if(dt == DISP_97) {
+        // Two-pass: eine Haelfte nach der anderen (80 KB statt 161 KB)
+        if(!allocPlanes(HALF_97)) return false;
+        File f = LittleFS.open(binPath, "w");
+        if(!f){ freePlanes(); return false; }
+        uint8_t hdr[4]={0,0,0,0}; f.write(hdr,4);
+        for(int h=0; h<2; h++){
+            g_decHalf = h;
+            memset(planeBW,0xFF,HALF_97); memset(planeRD,0xFF,HALF_97);
+            JRESULT jr = TJpgDec.drawFsJpg(0,0,jpgPath.c_str(),LittleFS);
+            if(jr!=JDR_OK){ f.close(); LittleFS.remove(binPath); freePlanes(); g_decHalf=-1;
+                Log.printf("[img] Decode fehlgeschlagen (%d) half=%d\n",jr,h); return false; }
+            StreamSrc src; src.p[0]=planeBW; src.n[0]=HALF_97;
+            src.p[1]=planeRD; src.n[1]=HALF_97; src.nseg=2; src.reset();
+            uint8_t r,v; while(rleNext(src,r,v)){ f.write(r); f.write(v); total+=2; }
+        }
+        g_decHalf=-1;
+        f.seek(0);
+        hdr[0]=total; hdr[1]=total>>8; hdr[2]=total>>16; hdr[3]=total>>24;
+        f.write(hdr,4); f.close(); freePlanes();
+    } else {
+        if(!allocPlanes(g.plane)) return false;
+        memset(planeBW,0xFF,g.plane); memset(planeRD,0xFF,g.plane);
+        JRESULT jr = TJpgDec.drawFsJpg(0, 0, jpgPath.c_str(), LittleFS);
+        if(jr!=JDR_OK){ Log.printf("[img] Decode fehlgeschlagen (%d)\n", jr); freePlanes(); return false; }
+        StreamSrc src; buildStreamSrc(src, dt);
+        { uint8_t r,v; while(rleNext(src,r,v)) total+=2; }
+        File f = LittleFS.open(binPath, "w");
+        if(!f){ Log.println("[img] FS write failed"); freePlanes(); return false; }
+        uint8_t hdr[4] = {(uint8_t)total, (uint8_t)(total>>8), (uint8_t)(total>>16), (uint8_t)(total>>24)};
+        f.write(hdr, 4);
+        src.reset(); uint8_t r,v;
+        while(rleNext(src,r,v)){ f.write(r); f.write(v); }
+        f.close(); freePlanes();
+    }
+
+    Log.printf("[img] %s (%s): %d RLE-Bytes gespeichert\n", binPath.c_str(), g.name, total);
+    return true;
+}
+
+// Vorkodierte RLE-Tokens per Funk senden.
+bool streamImage(uint8_t addr, const uint8_t *tokens, int total, uint8_t dt) {
     streamReTx = 0;
-    Serial.printf("  BW=%d RD=%d total=%d RLE-Bytes, ~%d DATA-Pakete\n",
-                  o, o2, total, (total + IMG_CHUNK - 1) / IMG_CHUNK);
+    Log.printf("  %d RLE-Bytes, ~%d DATA-Pakete\n", total, (total + IMG_CHUNK - 1) / IMG_CHUNK);
 
     uint8_t d[2+IMG_CHUNK]; uint8_t s;
     s = ++txSeq; d[0] = CMD_IMG_BEGIN; d[1] = s;
-    if (!sendReliable(addr, d, 2, 200, 80, s)) { Serial.println("  BEGIN kein ACK"); return false; }
-    Serial.printf("  link@CC: RSSI=%ddBm LQI=%d (kleiner=besser) FREQEST=%d\n",
+    if (!sendReliable(addr, d, 2, 200, 80, s)) { Log.println("  BEGIN kein ACK"); return false; }
+    Log.printf("  link@CC: RSSI=%ddBm LQI=%d (kleiner=besser) FREQEST=%d\n",
                   ((int8_t)lastRssi)/2 - 71, lastLqi & 0x7F, (int)(int8_t)lastFreq);
 
     int sent=0;
@@ -285,7 +453,7 @@ bool streamImage(uint8_t addr, int planeSize) {
         s = ++txSeq; d[0]=CMD_IMG_DATA; d[1]=s;
         memcpy(&d[2], &tokens[i], chunk);
         if (!sendReliable(addr, d, 2+chunk, 80, 120, s)) {
-            Serial.printf("  DATA kein ACK @%d (seq=%d/%d, %d ReTx) -> Abbruch\n", i, s, total, streamReTx);
+            Log.printf("  DATA kein ACK @%d (seq=%d/%d, %d ReTx) -> Abbruch\n", i, s, total, streamReTx);
             return false;
         }
         i += chunk; sent++;
@@ -293,62 +461,51 @@ bool streamImage(uint8_t addr, int planeSize) {
 
     s = ++txSeq; d[0]=CMD_IMG_SHOW; d[1]=s;
     d[2]=(uint8_t)(g_pollInterval>>8); d[3]=(uint8_t)g_pollInterval; d[4]=g_advertChannel;
-    bool ok = sendReliable(addr, d, 5, 60000, 3, s);   // + sleep(2) + channel(1)
-    Serial.printf("  stream %d RLE-Bytes in %d Paketen, %d ReTx, refresh %s\n",
+    // Tag ACKt SHOW erst nach dem Refresh (9.7" Spectra: Soft-Start + ~40 s)
+    uint32_t showTo = (dt==DISP_97) ? 150000 : 60000;
+    bool ok = sendReliable(addr, d, 5, showTo, 3, s);
+    Log.printf("  stream %d RLE-Bytes in %d Paketen, %d ReTx, refresh %s\n",
                   total, sent, streamReTx, ok?"OK":"FAIL");
     return ok;
 }
 
-// WLAN waehrend des Funk-Streams aus (stoert sonst den nRF24 massiv, s. Mess-
-// werte im Wetter-Gateway). Danach Reconnect im Hintergrund.
-// JPEG-Pfad fuer einen Tag: /img/<mac>.jpg
-String imgPath(uint8_t idx){ return "/img/" + tagMacStr(idx) + ".jpg"; }
-
-// JPEG von LittleFS laden + dekodieren in planeBW/planeRD. true bei Erfolg.
-bool decodeTagImage(uint8_t idx){
+void sendFrame(uint8_t idx){
     String path = imgPath(idx);
     File f = LittleFS.open(path, "r");
-    if(!f){ Serial.printf("[img] %s nicht gefunden\n", path.c_str()); return false; }
-    size_t sz = f.size();
-    if(sz > sizeof(jpgBuf)){ Serial.printf("[img] %s zu gross (%u)\n", path.c_str(), (unsigned)sz); f.close(); return false; }
-    f.read(jpgBuf, sz); f.close();
-
-    uint8_t dt = reg[idx].disp;
-    g_decDisp   = dt;
-    g_decDither = tagDither[idx];
-    g_decScrW   = (dt == DISP_42) ? SCR_W_42  : SCR_W_266;
-    g_decScrH   = (dt == DISP_42) ? SCR_H_42  : SCR_H_266;
-    g_decHbytes = (dt == DISP_42) ? HBYTES_42  : HBYTES_266;
-    int planeSize = (dt == DISP_42) ? PLANE_42 : PLANE_266;
-
-    memset(planeBW,0xFF,planeSize); memset(planeRD,0xFF,planeSize);
-    TJpgDec.setJpgScale(1);
-    TJpgDec.setCallback(jpgOutput);
-    JRESULT jr = TJpgDec.drawJpg(0,0, jpgBuf, sz);
-    if(jr!=JDR_OK){ Serial.printf("[img] Decode %s fehlgeschlagen (%d)\n", path.c_str(), jr); return false; }
-    return true;
-}
-
-void sendFrame(uint8_t idx){
-    uint8_t dt = reg[idx].disp;
-    int ps = (dt == DISP_42) ? PLANE_42 : PLANE_266;
-
-    if(!decodeTagImage(idx)) return;
+    if(!f){ Log.printf("[img] %s nicht gefunden\n", path.c_str()); return; }
+    uint8_t hdr[4];
+    if(f.read(hdr, 4) != 4){ f.close(); return; }
+    int total = (int)(hdr[0] | (hdr[1]<<8) | (hdr[2]<<16) | (hdr[3]<<24));
+    if(total <= 0 || total > 400000){ f.close(); Log.printf("[img] ungueltige Laenge %d\n", total); return; }
+    uint8_t *tokens = (uint8_t*)heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!tokens) tokens = (uint8_t*)malloc(total);
+    if(!tokens){ f.close(); Log.printf("[img] %d B Tokens nicht allokierbar\n", total); return; }
+    f.read(tokens, total);
+    f.close();
 
     led(20,0,20);  // magenta: streaming
-    bool wasOn = (WiFi.getMode()!=WIFI_OFF);
-    if(wasOn){ WiFi.mode(WIFI_OFF); delay(50); }
-    Serial.printf("[%lu] stream -> 0x%02X (WLAN aus fuer Stream)\n", millis(), reg[idx].addr);
-    bool ok = streamImage(reg[idx].addr, ps);
+    bool wasOn = (WiFi.status()==WL_CONNECTED || WiFi.getMode()!=WIFI_OFF);
+    if(wasOn){
+        WiFi.disconnect(true);
+        esp_wifi_stop();
+        delay(100);
+    }
+    Log.printf("[%lu] stream -> 0x%02X (%d RLE-Bytes, WLAN aus)\n", millis(), reg[idx].addr, total);
+    bool ok = streamImage(reg[idx].addr, tokens, total, reg[idx].disp);
+    free(tokens);
     lastFrame[idx]=millis();
     if(ok){
         updateCount[idx]++;
         tagImgPending[idx] = false;
-        LittleFS.remove(imgPath(idx));
+        LittleFS.remove(path);
     } else {
-        Serial.printf("[stream] FEHLGESCHLAGEN fuer 0x%02X, Retry beim naechsten Poll\n", reg[idx].addr);
+        Log.printf("[stream] FEHLGESCHLAGEN fuer 0x%02X, Retry beim naechsten Poll\n", reg[idx].addr);
     }
-    if(wasOn){ WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID,WIFI_PASS); }
+    if(wasOn){
+        esp_wifi_start();
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+    }
     led(0,20,0);  // gruen: bereit
 }
 
@@ -365,15 +522,15 @@ uint8_t approveUid(const uint8_t *uid, const uint8_t *label, uint8_t dispType){
     reg[regCount].disp=dispType;
     online[regCount]=false; lastFrame[regCount]=0; lastSeen[regCount]=0; updateCount[regCount]=0;
     regCount++; saveReg();
-    const char *dname = (dispType==DISP_42) ? "4.2\"" : "2.66\"";
-    Serial.printf("[enroll] %s -> 0x%02X (%s, auto)\n", hexBytes(label,4,0).c_str(), a, dname);
+    const char *dname = geo(dispType).name;
+    Log.printf("[enroll] %s -> 0x%02X (%s, auto)\n", hexBytes(label,4,0).c_str(), a, dname);
     return a;
 }
 void handleReq(const uint8_t*uid,const uint8_t*label, uint8_t dispType){
     uint8_t a=approveUid(uid,label,dispType);
     if(a){ int idx=findAddr(a); replyAssign(reg[idx].uid,a); lastSeen[idx]=millis();
         if(!online[idx]){ online[idx]=true; wsPushTag(idx);
-            Serial.printf("[online] %s Addr 0x%02X\n", hexBytes(reg[idx].label,4,0).c_str(), a); } }
+            Log.printf("[online] %s Addr 0x%02X\n", hexBytes(reg[idx].label,4,0).c_str(), a); } }
     else replyPending(uid);
 }
 
@@ -411,7 +568,14 @@ bool jpgOutput(int16_t bx, int16_t by, uint16_t w, uint16_t h, uint16_t *bmp){
             uint8_t b = (px&0x1F)<<3;
 
             int idx; uint8_t mask;
-            if (g_decDisp == DISP_42) {
+            if (g_decDisp == DISP_97) {
+                // half 0 = links (X<480), half 1 = rechts (X>=480)
+                int half = (X >= SCR_W_97/2) ? 1 : 0;
+                if (g_decHalf >= 0 && half != g_decHalf) continue;
+                int xx = X - half * (SCR_W_97/2);
+                idx = (g_decHalf < 0 ? half * HALF_97 : 0) + Y * HBYTES_97 + (xx >> 3);
+                mask = 0x80 >> (xx & 7);
+            } else if (g_decDisp == DISP_42) {
                 idx = Y * g_decHbytes + (X >> 3);
                 mask = 0x80 >> (X & 7);
             } else {
@@ -439,7 +603,7 @@ String buildTagJson(uint8_t idx){
     String s = "{";
     s += "\"mac\":\"" + tagMacStr(idx) + "\",";
     s += "\"alias\":\"" + hexBytes(reg[idx].label,4,0) + "\",";
-    uint8_t hwt = (reg[idx].disp == DISP_42) ? HW_TYPE_42 : HW_TYPE_266;
+    uint8_t hwt = geo(reg[idx].disp).hwType;
     s += "\"hwType\":" + String(hwt) + ",";
     s += "\"RSSI\":" + String(((int8_t)lastRssi)/2 - 71) + ",";
     s += "\"LQI\":" + String(lastLqi & 0x7F) + ",";
@@ -476,11 +640,11 @@ void wsPushSys(){
 void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *c, AwsEventType type,
                void *arg, uint8_t *data, size_t len){
     if(type==WS_EVT_CONNECT){
-        Serial.printf("[ws] HA verbunden (%s)\n", c->remoteIP().toString().c_str());
+        Log.printf("[ws] HA verbunden (%s)\n", c->remoteIP().toString().c_str());
         wsPushSys();
         for(uint8_t i=0;i<regCount;i++) wsPushTag(i);
     } else if(type==WS_EVT_DISCONNECT){
-        Serial.println("[ws] HA getrennt");
+        Log.println("[ws] HA getrennt");
     }
 }
 
@@ -491,7 +655,7 @@ void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *c, AwsEventType type,
 // via Timeout auch wir) auf Home zurueck.
 void maybeSwitchChannel(){
     if(g_advertChannel==g_operatingChannel) return;
-    Serial.printf("[ch] wechsle ch%u -> ch%u (Tag angesagt)\n", g_operatingChannel, g_advertChannel);
+    Log.printf("[ch] wechsle ch%u -> ch%u (Tag angesagt)\n", g_operatingChannel, g_advertChannel);
     g_operatingChannel=g_advertChannel;
     radio.setChannel(g_operatingChannel); modeRx();
 }
@@ -523,6 +687,20 @@ uint8_t scanBestChannel(String *report){
 void startServer(){
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *r){ r->send(200,"text/plain","OpenEPaperLink"); });
 
+    // Gespeicherte RLE-Daten zum Download: /img?mac=XXXX
+    server.on("/img", HTTP_GET, [](AsyncWebServerRequest *r){
+        if(!r->hasParam("mac")){ r->send(400,"text/plain","need ?mac=..."); return; }
+        int idx = findByMac(r->getParam("mac")->value());
+        if(idx<0){ r->send(404,"text/plain","unknown mac"); return; }
+        String path = imgPath(idx);
+        if(!LittleFS.exists(path)){ r->send(404,"text/plain","kein Bild gespeichert (erst nach Upload, weg nach Senden)"); return; }
+        File f = LittleFS.open(path, "r");
+        uint8_t hdr[4]; f.read(hdr,4); f.close();
+        int total = hdr[0]|(hdr[1]<<8)|(hdr[2]<<16)|(hdr[3]<<24);
+        String info = "RLE pending: " + String(total) + " Bytes (BW+RD)\nFuer JPEG: HA drawcustom mit dry-run: true";
+        r->send(200,"text/plain",info);
+    });
+
     // Host-Konfig: ?poll=<sek>&ch=<1..125> (beide optional). Der Tag uebernimmt
     // die Werte bei seiner naechsten Poll-Antwort.
     server.on("/config", HTTP_GET, [](AsyncWebServerRequest *r){
@@ -547,14 +725,14 @@ void startServer(){
     // Display-Typ eines Tags manuell setzen: /settype?mac=XX&type=42 oder type=266
     server.on("/settype", HTTP_GET, [](AsyncWebServerRequest *r){
         if(!r->hasParam("mac") || !r->hasParam("type")){
-            r->send(400,"text/plain","need ?mac=...&type=266|42"); return; }
+            r->send(400,"text/plain","need ?mac=...&type=266|42|97"); return; }
         int idx = findByMac(r->getParam("mac")->value());
         if(idx<0){ r->send(404,"text/plain","unknown mac"); return; }
         String t = r->getParam("type")->value();
-        uint8_t dt = (t=="42") ? DISP_42 : DISP_266;
+        uint8_t dt = (t=="97") ? DISP_97 : (t=="42") ? DISP_42 : DISP_266;
         reg[idx].disp = dt;  saveReg();
-        const char *dname = (dt==DISP_42) ? "4.2\"" : "2.66\"";
-        Serial.printf("[settype] %s -> %s\n", tagMacStr(idx).c_str(), dname);
+        const char *dname = geo(dt).name;
+        Log.printf("[settype] %s -> %s\n", tagMacStr(idx).c_str(), dname);
         r->send(200,"application/json","{\"mac\":\""+tagMacStr(idx)+"\",\"disp\":\""+dname+"\"}");
         wsPushTag(idx);
     });
@@ -573,44 +751,97 @@ void startServer(){
     });
 
     // /imgupload: multipart (mac, contentmode, dither, ttl, lut, image=JPEG).
-    // Felder kommen als POST-Params, die Bilddaten per Upload-Callback.
+    // JPEG wird sofort dekodiert + RLE-kodiert + als .bin gespeichert.
+    // Beim naechsten Poll liest sendFrame() nur noch die fertigen RLE-Tokens.
     server.on("/imgupload", HTTP_POST,
         [](AsyncWebServerRequest *r){
-            // onRequest: kompletter Body da -> mac holen, JPEG dekodieren.
             String mac = r->hasParam("mac", true) ? r->getParam("mac", true)->value() : "";
             int idx = findByMac(mac);
-            Serial.printf("[imgupload] mac=%s len=%u idx=%d\n", mac.c_str(), (unsigned)jpgLen, idx);
-            if(idx<0 || jpgLen==0){ r->send(404,"text/plain","unknown mac / no image"); jpgLen=0; return; }
+            Log.printf("[imgupload] mac=%s len=%u idx=%d\n", mac.c_str(), (unsigned)jpgLen, idx);
+            if(uploadFile) uploadFile.close();
+            if(idx<0 || jpgLen==0){ LittleFS.remove(UPLOAD_TMP); r->send(404,"text/plain","unknown mac / no image"); jpgLen=0; return; }
 
             uint8_t dither = r->hasParam("dither", true) ? r->getParam("dither", true)->value().toInt() : 0;
+            tagDither[idx] = dither;
 
-            led(0,15,20);  // cyan: Bild empfangen
-            String path = imgPath(idx);
+            led(0,15,20);  // cyan: decode+encode
+            String jpgPath = "/img/" + tagMacStr(idx) + ".jpg";
             size_t savedLen = jpgLen;
-            { File f = LittleFS.open(path, "w");
-              if(!f){ Serial.println("[imgupload] FS write failed"); r->send(500,"text/plain","fs error"); jpgLen=0; return; }
-              f.write(jpgBuf, jpgLen); f.close(); }
+            LittleFS.remove(jpgPath);
+            if(!LittleFS.rename(UPLOAD_TMP, jpgPath)){
+                Log.println("[imgupload] FS rename failed"); r->send(500,"text/plain","fs error"); jpgLen=0; return; }
             jpgLen=0;
 
-            uint8_t dt = reg[idx].disp;
-            const char *dname = (dt==DISP_42) ? "4.2\"" : "2.66\"";
-            Serial.printf("[imgupload] %uB -> %s (%s) dither=%u, wartet auf Poll von 0x%02X\n",
-                          (unsigned)savedLen, dname, path.c_str(), dither, reg[idx].addr);
+            if(!encodeAndStore(idx)){
+                LittleFS.remove(jpgPath);
+                r->send(500,"text/plain","decode/encode failed");
+                led(0,20,0);
+                return;
+            }
+            LittleFS.remove(jpgPath);
+
+            Log.printf("[imgupload] %uB JPEG -> RLE, wartet auf Poll von 0x%02X\n",
+                          (unsigned)savedLen, reg[idx].addr);
             tagImgPending[idx] = true;
-            tagDither[idx] = dither;
-            led(0,20,0);  // gruen: bereit
+            led(0,20,0);
             r->send(200,"text/plain","OK");
         },
         [](AsyncWebServerRequest *r, String filename, size_t index, uint8_t *data, size_t len, bool final){
-            // onUpload: Bilddaten (Feld 'image') einsammeln.
-            if(index==0) jpgLen=0;
-            if(jpgLen + len <= sizeof(jpgBuf)){ memcpy(jpgBuf+jpgLen, data, len); jpgLen += len; }
+            if(index==0){
+                jpgLen=0;
+                if(uploadFile) uploadFile.close();
+                uploadFile = LittleFS.open(UPLOAD_TMP, "w");
+            }
+            if(uploadFile && len) jpgLen += uploadFile.write(data, len);
+            if(final && uploadFile) uploadFile.close();
         });
+
+    // Live-Konsole: /console zeigt Log-Output im Browser.
+    server.on("/console", HTTP_GET, [](AsyncWebServerRequest *r){
+        r->send(200, "text/html",
+            "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
+            "<title>PriceTag Log</title><style>"
+            "body{margin:0;background:#1a1a2e;color:#0f0;font:13px/1.4 monospace}"
+            "#log{padding:8px;white-space:pre-wrap;word-break:break-all}"
+            "#bar{position:sticky;top:0;background:#16213e;padding:6px 10px;border-bottom:1px solid #333;"
+            "display:flex;justify-content:space-between;align-items:center;color:#aaa;font-size:12px}"
+            "#bar b{color:#0f0} button{background:#0f0;color:#000;border:0;padding:4px 12px;cursor:pointer;font:inherit}"
+            ".err{color:#f44} .warn{color:#fa0} .info{color:#0af}"
+            "</style></head><body>"
+            "<div id='bar'><span><b>PriceTag</b> Serial Console</span>"
+            "<span id='st'>verbinde...</span>"
+            "<button onclick='document.getElementById(\"log\").textContent=\"\"'>Clear</button></div>"
+            "<div id='log'></div><script>"
+            "var log=document.getElementById('log'),st=document.getElementById('st');"
+            "function go(){"
+            "var ws=new WebSocket('ws://'+location.host+'/log');"
+            "ws.onopen=function(){st.textContent='verbunden';st.style.color='#0f0'};"
+            "ws.onclose=function(){st.textContent='getrennt - reconnect...';st.style.color='#f44';"
+            "setTimeout(go,2000)};"
+            "ws.onmessage=function(e){"
+            "var s=document.createElement('span');"
+            "var t=e.data;"
+            "if(t.indexOf('FEHL')>=0||t.indexOf('ERROR')>=0||t.indexOf('overflow')>=0)s.className='err';"
+            "else if(t.indexOf('WARN')>=0)s.className='warn';"
+            "else if(t.indexOf('[http]')>=0||t.indexOf('[ws]')>=0||t.indexOf('WiFi')>=0)s.className='info';"
+            "s.textContent=t;"
+            "log.appendChild(s);"
+            "if(log.childNodes.length>500)log.removeChild(log.firstChild);"
+            "window.scrollTo(0,document.body.scrollHeight)}"
+            "} go();"
+            "</script></body></html>"
+        );
+    });
+
+    wsLog.onEvent([](AsyncWebSocket*,AsyncWebSocketClient*c,AwsEventType t,void*,uint8_t*,size_t){
+        if(t==WS_EVT_CONNECT) Log.printf("[console] Browser verbunden (%s)\n", c->remoteIP().toString().c_str());
+    });
+    server.addHandler(&wsLog);
 
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
     server.begin();
-    Serial.println("[http] OEPL-AP-Shim laeuft auf Port 80 (/, /sysinfo, /get_db, /ws, /imgupload, /settype)");
+    Log.println("[http] OEPL-AP-Shim laeuft auf Port 80 (/, /sysinfo, /get_db, /ws, /imgupload, /settype, /img, /console)");
 }
 
 // ---------- setup / loop ----------
@@ -626,7 +857,7 @@ void ensureWifi(){
     if(WiFi.status()==WL_CONNECTED){
         if(!wifiWasConnected){
             wifiWasConnected = true;
-            Serial.printf("WiFi verbunden: %s  (http://%s.local)\n", WiFi.localIP().toString().c_str(), MDNS_NAME);
+            Log.printf("WiFi verbunden: %s  (http://%s.local)\n", WiFi.localIP().toString().c_str(), MDNS_NAME);
             configTzTime(TZ_STRING,"pool.ntp.org","time.google.com");
             if(!netInit){                                // Server/mDNS nur einmal starten
                 netInit = true;
@@ -636,11 +867,18 @@ void ensureWifi(){
         }
         return;
     }
-    if(wifiWasConnected){ wifiWasConnected=false; Serial.println("WiFi getrennt - versuche erneut..."); }
+    if(wifiWasConnected){ wifiWasConnected=false; Log.println("WiFi getrennt - versuche erneut..."); }
     if(millis() >= wifiNextTry){
-        wifiNextTry = millis() + 5000;                   // alle 5 s neuer Versuch
+        wifiNextTry = millis() + 5000;
+        wifi_mode_t m; esp_wifi_get_mode(&m);
+        if(m == WIFI_MODE_NULL){
+            esp_wifi_start();
+            WiFi.mode(WIFI_STA);
+        }
+        WiFi.disconnect(false);
+        delay(10);
         WiFi.begin(WIFI_SSID, WIFI_PASS);
-        Serial.println("WiFi: erneuter Verbindungsversuch...");
+        Log.println("WiFi: erneuter Verbindungsversuch...");
     }
 }
 
@@ -648,36 +886,36 @@ void setup(){
     Serial.begin(115200);
     { uint32_t _t=millis(); while(!Serial && millis()-_t<1500) delay(10); }  // nicht ewig auf USB-Serial warten
     led(0,0,20);  // blau: Boot
-    Serial.println("\n=== PriceTag Gateway (OpenEPaperLink-AP-Shim) ===");
-    if(!LittleFS.begin(true)) Serial.println("WARN: LittleFS mount failed");
+    Log.println("\n=== PriceTag Gateway (OpenEPaperLink-AP-Shim) ===");
+    if(!LittleFS.begin(true)) Log.println("WARN: LittleFS mount failed");
     LittleFS.mkdir("/img");
     prefs.begin("pricetag",false); loadReg();
-    Serial.printf("Registry: %u Tag(s)\n", regCount);
+    Log.printf("Registry: %u Tag(s)\n", regCount);
     for(uint8_t i=0;i<regCount;i++){
-        const char *dname = (reg[i].disp==DISP_42) ? "4.2\"" : "2.66\"";
-        Serial.printf("  0x%02X  mac=%s  label=%s  disp=%s\n", reg[i].addr, tagMacStr(i).c_str(), hexBytes(reg[i].label,4,0).c_str(), dname);
+        const char *dname = geo(reg[i].disp).name;
+        Log.printf("  0x%02X  mac=%s  label=%s  disp=%s\n", reg[i].addr, tagMacStr(i).c_str(), hexBytes(reg[i].label,4,0).c_str(), dname);
     }
 
     WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true);
 #if USE_STATIC_IP
     if(!WiFi.config(STATIC_IP, STATIC_GW, STATIC_SN, STATIC_DNS))
-        Serial.println("WARN: WiFi.config (feste IP) fehlgeschlagen");
+        Log.println("WARN: WiFi.config (feste IP) fehlgeschlagen");
 #endif
     led(20,15,0);  // gelb: WiFi verbinden
-    WiFi.begin(WIFI_SSID,WIFI_PASS); Serial.print("WiFi");
-    for(int i=0;i<40 && WiFi.status()!=WL_CONNECTED;i++){ delay(250); Serial.print("."); }
+    WiFi.begin(WIFI_SSID,WIFI_PASS); Log.print("WiFi");
+    for(int i=0;i<40 && WiFi.status()!=WL_CONNECTED;i++){ delay(250); Log.print("."); }
     // Verbindung, Reconnect und Netz-Init (mDNS/Zeit/Server) uebernimmt
     // ensureWifi() in loop() - auch wenn der erste Versuch hier scheitert.
-    Serial.println(WiFi.status()==WL_CONNECTED ? " ok" : " FEHLT (versuche im Hintergrund weiter)");
+    Log.println(WiFi.status()==WL_CONNECTED ? " ok" : " FEHLT (versuche im Hintergrund weiter)");
 
     SPI.begin(3,9,7,CSN_PIN);
-    if(!radio.begin(&SPI)){ led(20,0,0); Serial.println("ERROR nRF24"); while(1) delay(1000); }
+    if(!radio.begin(&SPI)){ led(20,0,0); Log.println("ERROR nRF24"); while(1) delay(1000); }
     radio.setChannel(g_operatingChannel); radio.setDataRate(RF24_250KBPS); radio.setPALevel(RF24_PA_MAX);
     radio.setPayloadSize(NRF_PAYLOAD_SIZE); radio.setAutoAck(false); radio.setRetries(0,0);
     radio.disableDynamicPayloads(); radio.disableCRC(); modeRx();
 
     led(0,20,0);  // gruen: bereit
-    Serial.println("Bereit. Tag per NFC/Boot meldet sich an (Auto-Enroll).\n");
+    Log.println("Bereit. Tag per NFC/Boot meldet sich an (Auto-Enroll).\n");
 }
 
 uint32_t lastSysPush = 0;
@@ -685,6 +923,7 @@ uint32_t lastSysPush = 0;
 void loop(){
     ensureWifi();
     ws.cleanupClients();
+    wsLog.cleanupClients();
 
     // Periodischer sys-Push, damit HA den AP als online fuehrt.
     if(millis()-lastSysPush > 30000){ lastSysPush=millis(); wsPushSys(); }
@@ -695,22 +934,22 @@ void loop(){
             uint8_t cmd=raw[2];
             g_lastTagContact=millis();
             if(cmd==CMD_ENROLL_REQ && len>=12){
-                uint8_t ptype = (len >= 13) ? raw[14] : DISP_266;
+                uint8_t ptype = (len >= 13 && raw[14] < DISP_COUNT) ? raw[14] : DISP_266;
                 handleReq(&raw[3],&raw[10], ptype);
             }
             else if(cmd==CMD_POLL){
                 uint8_t src=raw[0]; int idx=findAddr(src);
                 if(idx>=0){ lastSeen[idx]=millis();
-                    if(!online[idx]){ online[idx]=true; Serial.printf("[online] 0x%02X\n", src); }
+                    if(!online[idx]){ online[idx]=true; Log.printf("[online] 0x%02X\n", src); }
                     if(tagImgPending[idx]){
-                        Serial.printf("[%lu] poll 0x%02X -> stream (Bild von HA)\n", millis(), src);
+                        Log.printf("[%lu] poll 0x%02X -> stream (Bild von HA)\n", millis(), src);
                         sendFrame(idx);
                         wsPushTag(idx);
                     } else {
                         // NOUPDATE traegt [sleep_hi][sleep_lo][channel]
                         uint8_t d[4]={CMD_NOUPDATE,(uint8_t)(g_pollInterval>>8),(uint8_t)g_pollInterval,g_advertChannel};
                         sendCmd(src,d,4);
-                        Serial.printf("[%lu] poll 0x%02X -> nix (poll=%us ch=%u)\n", millis(), src, g_pollInterval, g_advertChannel);
+                        Log.printf("[%lu] poll 0x%02X -> nix (poll=%us ch=%u)\n", millis(), src, g_pollInterval, g_advertChannel);
                     }
                     maybeSwitchChannel();   // nach der Antwort ggf. selbst auf den neuen Kanal
                 }
@@ -722,7 +961,7 @@ void loop(){
     // auf Home, ist der Tag wohl auf Home zurueckgefallen -> wir folgen.
     if(g_operatingChannel!=HOME_CHANNEL && g_lastTagContact &&
        millis()-g_lastTagContact > (uint32_t)g_pollInterval*3000UL){
-        Serial.printf("[ch] lange kein Tag auf ch%u -> zurueck auf Home ch%u\n", g_operatingChannel, HOME_CHANNEL);
+        Log.printf("[ch] lange kein Tag auf ch%u -> zurueck auf Home ch%u\n", g_operatingChannel, HOME_CHANNEL);
         g_advertChannel=HOME_CHANNEL; g_operatingChannel=HOME_CHANNEL;
         radio.setChannel(HOME_CHANNEL); modeRx();
         g_lastTagContact=millis();

@@ -212,6 +212,29 @@ static void build_id_line(void) {
     line_id[p] = 0;
 }
 
+#ifdef PANEL_97
+/* 9.7": draw-list rendering takes ~5 min (960x672 per-pixel).
+ * Use a fast streaming fill instead — the gateway image comes via
+ * the streaming path anyway. */
+static void show_fast_white(void) {
+    uint16_t i;
+    uint8_t rle[2];
+    clk_rc();
+    epd_img_begin();
+    rle[1] = 0xFF;
+    for (i = 0; i < 632; i++) { rle[0] = 255; epd_img_rle(rle, 2); }
+    rle[0] = 120; epd_img_rle(rle, 2);
+    if (epd_img_complete()) epd_img_show();
+    clk_xosc();
+}
+static void show(const char *status) {
+    (void)status;
+    show_fast_white();
+}
+static void show_offline(void) {
+    show_fast_white();
+}
+#else
 static void show(const char *status) {
     uint8_t i;
     for (i = 0; status[i] && i < 23; i++) line_status[i] = status[i];
@@ -233,6 +256,7 @@ static void show_offline(void) {
     epd_text(10, 44, "Suche Gateway...", BLACK, 1);
     epd_render();
 }
+#endif
 
 static uint8_t uid_matches(const uint8_t *p) {
     uint8_t i;
@@ -250,21 +274,13 @@ static void send_enroll_req(void) {
 }
 
 static void send_ack(uint8_t status, uint8_t seq) {
-    /* Turnaround delay: the gateway is still switching nRF24 from TX to RX
-     * right after it sent us the command. If we ACK immediately it arrives
-     * before the gateway is listening and is lost every time (a systematic
-     * race, not packet loss). Wait so the gateway is in RX, then ACK twice.
-     * The ACK echoes the packet's seq so the gateway only advances when THIS
-     * packet was acked (a stale ACK from the previous packet no longer counts,
-     * which used to let the gateway skip ahead and desync the stream). */
     txb[0] = CMD_ACK;
     txb[1] = status;
     txb[2] = seq;
-    txb[3] = radio_rssi;      /* link metrics of the packet we're acking, so */
-    txb[4] = radio_lqi;       /* the gateway can print why the CC->path is   */
-    txb[5] = radio_freqest;   /* noisy (signal vs demod vs frequency).       */
-    delay_ms(10);
-    radio_tx(txb, 6);
+    txb[3] = radio_rssi;
+    txb[4] = radio_lqi;
+    txb[5] = radio_freqest;
+    delay_ms(2);
     radio_tx(txb, 6);
 }
 
@@ -318,7 +334,12 @@ static uint8_t handle_img(uint8_t len) {
              * retransmitted (DATA has a big retry budget), so none are lost. */
             last_rx_seq = seq; seq_valid = 1;
             send_ack(0, seq);
-            clk_rc(); epd_img_begin(); clk_xosc();
+            /* Lock CLKSPD=0 (full CPU speed) for the whole stream.
+             * radio_rx_raw also sets CLKSPD=0 and restores; with CLKSPD
+             * already at 0 that becomes a no-op, preventing SPI baud
+             * rate glitches while the COG CS is held low. */
+            CLKCON &= (uint8_t)~0x07;
+            epd_img_begin();
         } else {
             send_ack(0, seq);
         }
@@ -334,10 +355,8 @@ static uint8_t handle_img(uint8_t len) {
 
     case CMD_IMG_SHOW:
         if (!seq_valid || seq != last_rx_seq) {
-            clk_rc();
             if (epd_img_complete()) epd_img_show();  /* refresh + deep sleep */
             else                    epd_sleep();     /* truncated -> keep image */
-            clk_xosc();
             last_rx_seq = seq; seq_valid = 1;
         }
         send_ack(0, seq);
@@ -414,8 +433,14 @@ void main(void) {
     led_init();                /* LEDs off (boost disabled) */
 
     radio_init(ENROLL_ADDR);   /* selects the crystal (XOSC) */
-    nfc_init();
 
+#ifdef PANEL_97
+    /* 9.7" board has no NFC chip — use a fixed identity */
+    uid[0]=0x97; uid[1]=0x00; uid[2]=0x00; uid[3]=0x00;
+    uid[4]=0x00; uid[5]=0x00; uid[6]=0x01;
+    label[0]=0x97; label[1]=0x00; label[2]=0x00; label[3]=0x01;
+#else
+    nfc_init();
     if (!nfc_read_uid(uid)) {
         epd_clear(WHITE);
         epd_text(10, 40, "NFC Fehler", RED, 3);
@@ -423,6 +448,7 @@ void main(void) {
         for (;;) { }
     }
     nfc_read_label(label);
+#endif
     build_id_line();
 
     show("Verbinde...");
@@ -448,7 +474,9 @@ void main(void) {
         }
 
         g_offline_shown = 0;
+#ifndef PANEL_97
         if (!g_ndef_written) { nfc_write_ndef_url(label); g_ndef_written = 1; }
+#endif
 
         misses = 0;
         for (;;) {
@@ -466,6 +494,7 @@ void main(void) {
                 g_cur_channel = g_next_channel;
             }
 
+#ifndef PANEL_97
             nfc_write_status(radio_rssi, radio_lqi, g_poll_count, misses);
 
             { uint16_t cfg_poll; uint8_t cfg_ch, cfg_flags;
@@ -474,6 +503,7 @@ void main(void) {
                   if (cfg_ch >= 1 && cfg_ch <= 125) g_next_channel = cfg_ch;
               }
             }
+#endif
 
             radio_sleep();
             cc_sleep(g_poll_secs);

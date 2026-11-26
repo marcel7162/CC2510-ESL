@@ -47,6 +47,8 @@ display: display.bin
 
 display42: display42.bin
 
+display97: display97.bin
+
 nfc-scan: nfc_scan.bin
 
 nfc-uid: nfc_uid.bin
@@ -60,6 +62,14 @@ enroll: enroll.bin
 flash-test: flash_test.bin
 
 cobs-test: cobs_test.bin
+
+epd97-test: epd97_test.bin
+
+epd97-bw: epd97_bw.bin
+
+epd97-clk: epd97_clk.bin
+
+epd97-diag: epd97_diag.bin
 
 %.rel: %.c
 	$(CC) -c $(CFLAGS) -o $@ $<
@@ -91,6 +101,63 @@ RELS_DISPLAY42 = src/main_display_42.rel src/epd_42.rel src/radio.rel src/nfc.re
 display42.ihx: $(RELS_DISPLAY42)
 	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_DISPLAY42)
 
+# 9.7" panel variant (Pervasive E2969JS08, dual COG): -DPANEL_97
+src/epd_97.rel: src/epd.c
+	$(CC) -c $(CFLAGS) -DPANEL_97 -o $@ $<
+
+src/main_display_97.rel: src/main_display.c
+	$(CC) -c $(CFLAGS) -DPANEL_97 -o $@ $<
+
+RELS_DISPLAY97 = src/main_display_97.rel src/epd_97.rel src/radio.rel src/nfc.rel
+
+display97.ihx: $(RELS_DISPLAY97)
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_DISPLAY97)
+
+# 9.7" EPD-only test (no radio, no NFC - just panel init + test pattern)
+src/main_epd97_test_97.rel: src/main_epd97_test.c
+	$(CC) -c $(CFLAGS) -DPANEL_97 -o $@ $<
+
+RELS_EPD97_TEST = src/main_epd97_test_97.rel src/epd_97.rel
+
+epd97_test.ihx: $(RELS_EPD97_TEST)
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_EPD97_TEST)
+
+# 9.7" fast streaming test (no radio - local data via epd_img_begin/rle/show)
+src/main_epd97_fast_test_97.rel: src/main_epd97_fast_test.c
+	$(CC) -c $(CFLAGS) -DPANEL_97 -o $@ $<
+
+RELS_EPD97_FAST = src/main_epd97_fast_test_97.rel src/epd_97.rel
+
+epd97_fast.ihx: $(RELS_EPD97_FAST)
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_EPD97_FAST)
+
+epd97-fast: epd97_fast.bin
+
+# 9.7" minimal black/white test (no radio, no NFC)
+src/main_epd97_bw_97.rel: src/main_epd97_bw.c
+	$(CC) -c $(CFLAGS) -DPANEL_97 -o $@ $<
+
+RELS_EPD97_BW = src/main_epd97_bw_97.rel src/epd_97.rel
+
+epd97_bw.ihx: $(RELS_EPD97_BW)
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_EPD97_BW)
+
+# 9.7" clock-switching test (XOSC->RC before EPD, like display97)
+src/main_epd97_clk_97.rel: src/main_epd97_clk.c
+	$(CC) -c $(CFLAGS) -DPANEL_97 -o $@ $<
+
+RELS_EPD97_CLK = src/main_epd97_clk_97.rel src/epd_97.rel
+
+epd97_clk.ihx: $(RELS_EPD97_CLK)
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_EPD97_CLK)
+
+# 9.7" standalone diagnostics (no epd.c, just pin probing + OTP read)
+SRCS_EPD97_DIAG = src/main_epd97_diag.c
+RELS_EPD97_DIAG = $(SRCS_EPD97_DIAG:.c=.rel)
+
+epd97_diag.ihx: $(RELS_EPD97_DIAG)
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_EPD97_DIAG)
+
 nfc_scan.ihx: $(RELS_NFC_SCAN)
 	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(RELS_NFC_SCAN)
 
@@ -119,4 +186,4 @@ clean:
 	rm -f src/*.rel src/*.asm src/*.lst src/*.sym src/*.rst
 	rm -f *.ihx *.bin *.lk *.map *.mem
 
-.PHONY: all radio-tx radio-rx radio-loopback display display42 nfc-scan nfc-uid nfc-test nfc-dump enroll flash-test cobs-test clean
+.PHONY: all radio-tx radio-rx radio-loopback display display42 display97 epd97-test epd97-fast epd97-bw epd97-clk epd97-diag nfc-scan nfc-uid nfc-test nfc-dump enroll flash-test cobs-test clean
