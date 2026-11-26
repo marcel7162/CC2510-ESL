@@ -309,10 +309,8 @@ uint8_t radio_rx_raw(uint8_t *buf, uint8_t maxlen, uint16_t timeout_ms) {
      * Run the CPU at FULL speed (CLKSPD=0, f/1) for the whole capture. The
      * per-byte RX lockstep must read each RFD within its ~32us air slot before
      * the next byte overwrites it; at the reset-default divided clock (e.g.
-     * f/2 = 13MHz) the margin is thin and bytes corrupt (distance-independent,
-     * TX unaffected since the radio paces TX). Doubling the CPU speed doubles
-     * that margin. Restored before every return so the EPD timing (tuned at
-     * the divided clock) is untouched.
+     * f/2 = 13MHz) the margin is thin and bytes corrupt.
+     * Restored before every return so the caller's clock is untouched.
      */
     saved_clk = CLKCON;
     CLKCON &= (uint8_t)~0x07;

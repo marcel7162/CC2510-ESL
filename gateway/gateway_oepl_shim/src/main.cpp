@@ -74,7 +74,7 @@ IPAddress STATIC_DNS(192,168,137,1);
 #define HBYTES_42  50
 #define PLANE_42   15000   // 300 * 50
 
-// 9.7": zwei Controller (Master = linke, Slave = rechte Haelfte). Jede Ebene
+// 9.7": zwei Controller (Master = LINKE, Slave = RECHTE Haelfte). Jede Ebene
 // liegt im Speicher als [linke Haelfte 672x60 B][rechte Haelfte 672x60 B],
 // gestreamt wird in COG-Reihenfolge: M-schwarz, M-rot, S-schwarz, S-rot.
 #define SCR_W_97   960
@@ -112,7 +112,7 @@ static void led(uint8_t r, uint8_t g, uint8_t b){ neopixelWrite(LED_PIN, r, g, b
 #define CMD_POLL           0x23
 #define CMD_NOUPDATE       0x24
 
-#define IMG_CHUNK 12
+#define IMG_CHUNK 27
 
 const uint8_t txAddr[5] = {0xA7, 0x5C, 0xA7, 0xAA, 0xAA};
 const uint8_t rxAddr[3] = {0xA7, 0x5C, 0xA7};
@@ -183,6 +183,7 @@ static uint8_t  g_decDither = 0;
 static uint16_t g_decScrW   = SCR_W_266;
 static uint16_t g_decScrH   = SCR_H_266;
 static uint8_t  g_decHbytes = HBYTES_266;
+static int8_t   g_decHalf   = -1;         // 9.7" two-pass: 0=left, 1=right, -1=both
 
 #define MAX_ENTRIES 16
 struct Entry { uint8_t uid[7]; uint8_t addr; uint8_t label[4]; uint8_t disp; };
@@ -352,10 +353,10 @@ struct StreamSrc {
 };
 static void buildStreamSrc(StreamSrc &src, uint8_t dt){
     if(dt==DISP_97){
-        src.p[0]=planeBW;          src.n[0]=HALF_97;   // Master schwarz
-        src.p[1]=planeRD;          src.n[1]=HALF_97;   // Master rot
-        src.p[2]=planeBW+HALF_97;  src.n[2]=HALF_97;   // Slave schwarz
-        src.p[3]=planeRD+HALF_97;  src.n[3]=HALF_97;   // Slave rot
+        src.p[0]=planeBW;          src.n[0]=HALF_97;   // Master schwarz (linke Haelfte)
+        src.p[1]=planeRD;          src.n[1]=HALF_97;   // Master rot    (linke Haelfte)
+        src.p[2]=planeBW+HALF_97;  src.n[2]=HALF_97;   // Slave schwarz (rechte Haelfte)
+        src.p[3]=planeRD+HALF_97;  src.n[3]=HALF_97;   // Slave rot     (rechte Haelfte)
         src.nseg=4;
     } else {
         int ps=geo(dt).plane;
@@ -390,27 +391,46 @@ bool encodeAndStore(uint8_t idx){
     g_decScrH   = g.h;
     g_decHbytes = g.hbytes;
 
-    if(!allocPlanes(g.plane)) return false;
-    memset(planeBW,0xFF,g.plane); memset(planeRD,0xFF,g.plane);
     TJpgDec.setJpgScale(1);
     TJpgDec.setCallback(jpgOutput);
-    JRESULT jr = TJpgDec.drawFsJpg(0, 0, jpgPath.c_str(), LittleFS);
-    if(jr!=JDR_OK){ Log.printf("[img] Decode fehlgeschlagen (%d)\n", jr); freePlanes(); return false; }
-
-    StreamSrc src; buildStreamSrc(src, dt);
-    int total=0; { uint8_t r,v; while(rleNext(src,r,v)) total+=2; }
-
     String binPath = imgPath(idx);
-    File f = LittleFS.open(binPath, "w");
-    if(!f){ Log.println("[img] FS write failed"); freePlanes(); return false; }
-    uint8_t hdr[4] = {(uint8_t)total, (uint8_t)(total>>8), (uint8_t)(total>>16), (uint8_t)(total>>24)};
-    f.write(hdr, 4);
+    int total = 0;
 
-    src.reset();
-    uint8_t r,v;
-    while(rleNext(src,r,v)){ f.write(r); f.write(v); }
-    f.close();
-    freePlanes();
+    if(dt == DISP_97) {
+        // Two-pass: eine Haelfte nach der anderen (80 KB statt 161 KB)
+        if(!allocPlanes(HALF_97)) return false;
+        File f = LittleFS.open(binPath, "w");
+        if(!f){ freePlanes(); return false; }
+        uint8_t hdr[4]={0,0,0,0}; f.write(hdr,4);
+        for(int h=0; h<2; h++){
+            g_decHalf = h;
+            memset(planeBW,0xFF,HALF_97); memset(planeRD,0xFF,HALF_97);
+            JRESULT jr = TJpgDec.drawFsJpg(0,0,jpgPath.c_str(),LittleFS);
+            if(jr!=JDR_OK){ f.close(); LittleFS.remove(binPath); freePlanes(); g_decHalf=-1;
+                Log.printf("[img] Decode fehlgeschlagen (%d) half=%d\n",jr,h); return false; }
+            StreamSrc src; src.p[0]=planeBW; src.n[0]=HALF_97;
+            src.p[1]=planeRD; src.n[1]=HALF_97; src.nseg=2; src.reset();
+            uint8_t r,v; while(rleNext(src,r,v)){ f.write(r); f.write(v); total+=2; }
+        }
+        g_decHalf=-1;
+        f.seek(0);
+        hdr[0]=total; hdr[1]=total>>8; hdr[2]=total>>16; hdr[3]=total>>24;
+        f.write(hdr,4); f.close(); freePlanes();
+    } else {
+        if(!allocPlanes(g.plane)) return false;
+        memset(planeBW,0xFF,g.plane); memset(planeRD,0xFF,g.plane);
+        JRESULT jr = TJpgDec.drawFsJpg(0, 0, jpgPath.c_str(), LittleFS);
+        if(jr!=JDR_OK){ Log.printf("[img] Decode fehlgeschlagen (%d)\n", jr); freePlanes(); return false; }
+        StreamSrc src; buildStreamSrc(src, dt);
+        { uint8_t r,v; while(rleNext(src,r,v)) total+=2; }
+        File f = LittleFS.open(binPath, "w");
+        if(!f){ Log.println("[img] FS write failed"); freePlanes(); return false; }
+        uint8_t hdr[4] = {(uint8_t)total, (uint8_t)(total>>8), (uint8_t)(total>>16), (uint8_t)(total>>24)};
+        f.write(hdr, 4);
+        src.reset(); uint8_t r,v;
+        while(rleNext(src,r,v)){ f.write(r); f.write(v); }
+        f.close(); freePlanes();
+    }
 
     Log.printf("[img] %s (%s): %d RLE-Bytes gespeichert\n", binPath.c_str(), g.name, total);
     return true;
@@ -549,10 +569,11 @@ bool jpgOutput(int16_t bx, int16_t by, uint16_t w, uint16_t h, uint16_t *bmp){
 
             int idx; uint8_t mask;
             if (g_decDisp == DISP_97) {
-                // linke Haelfte -> Master-COG, rechte -> Slave-COG
+                // half 0 = links (X<480), half 1 = rechts (X>=480)
                 int half = (X >= SCR_W_97/2) ? 1 : 0;
+                if (g_decHalf >= 0 && half != g_decHalf) continue;
                 int xx = X - half * (SCR_W_97/2);
-                idx = half * HALF_97 + Y * HBYTES_97 + (xx >> 3);
+                idx = (g_decHalf < 0 ? half * HALF_97 : 0) + Y * HBYTES_97 + (xx >> 3);
                 mask = 0x80 >> (xx & 7);
             } else if (g_decDisp == DISP_42) {
                 idx = Y * g_decHbytes + (X >> 3);

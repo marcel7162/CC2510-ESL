@@ -7,7 +7,7 @@ Displays nutzen: Wetter, Energie, Status. Drei Panel-Größen parallel am selben
 Gateway:
 - **2,66"** 296×152 BWR (IL0373/E2266) — hwType 0x56
 - **4,2"**  400×300 BWR (IL0398/E2417JS0D1) — hwType 0x02
-- **9,7"**  960×672 BWR (Pervasive E2969JS08, Dual-COG) — hwType 0x2E — *neu, HW-Test offen*
+- **9,7"**  960×672 BWR (Pervasive E2969JS08, Dual-COG) — hwType 0x2E — *Display verifiziert 2026-11-25*
 
 ## Architektur
 
@@ -71,44 +71,58 @@ nicht möglich; Update alle paar Minuten ist die sinnvolle Kadenz. Das Pull-
 Modell (Tag schläft, pollt, zeigt nur bei neuem Bild) ist bereits das
 akkuschonende Design (Dauer-RX ~18 mA ≙ Tage; Poll-Schlaf ≙ Monate).
 
-## 9,7"-Tag (Stand 2026-11-24): Treiber gebaut, HW-Test offen
+## 9,7”-Tag (Stand 2026-11-25): Display funktioniert, Pinout verifiziert
 
-Hardware laut Fotos: Imagotag-Platine **RFRTx0368**, Panel-Label
+Hardware: Imagotag-Platine **RFRTx0368**, Panel-Label
 `TE2969JS084 / SPP07JA / TC097SC1B8-SK` → Pervasive Displays **E2969JS08x**
-(9,69" Spectra Schwarz/Weiß/Rot, G2.1-COG, „Large“-Familie). In der
-mitgelieferten PDLS-Bibliothek (`doc/PDLS_EXT3_Basic_Global-main.zip`) ist das
-`eScreen_EPD_969_JS_08` (FAMILY_LARGE, DRIVER_8) — daran ist der Treiber
-1:1 angelehnt.
+(9,69” Spectra Schwarz/Weiß/Rot, G2.1-COG, „Large”-Familie). Treiber nach
+PDLS_EXT3_Basic_Global (`doc/PDLS_EXT3_Basic_Global-main.zip`), Screen
+`eScreen_EPD_969_JS_08` (FAMILY_LARGE, DRIVER_8).
+
+### Verifiziertes Pinout (2026-11-25)
+
+| Pin   | Funktion       | Anmerkung |
+|-------|----------------|-----------|
+| P0.0  | EPD_PWR        | Active Low, wie kleine Tags |
+| P0.1  | EPD_CSS        | **Slave**-COG CS (links!) |
+| P0.3  | SPI SDA/MOSI   | USART0 TXD, Bit-Bang für OTP |
+| P0.5  | SPI SCK        | USART0 SCK |
+| P0.7  | EPD_CS         | **Master**-COG CS (rechts!) |
+| P1.2  | EPD_DC         | Data/Command |
+| P1.3  | EPD_BUSY       | Input, Low = busy |
+| P2.0  | EPD_RESET      | Shared, beide COGs |
+
+**Achtung:** CS/CSS sind gegenüber der ursprünglichen Annahme **vertauscht**
+(P0.7 = Master, P0.1 = Slave). Außerdem sitzt der Master-COG physisch
+**rechts** und der Slave **links** (umgekehrt zur Pervasive-Doku).
+
+### Bekannte Eigenheiten
+
+- **OTP-Read braucht Doppel-Versuch:** Der erste SPI-Read nach Power-On liefert
+  0xFF. Ein Power-Cycle (PWR aus/an) + erneuter Read funktioniert. Als Workaround
+  sind die 80 OTP-Bytes als `otp_default[]` in `epd.c` hardcoded (Fallback).
+- **Rendering auf dem 8051 ist langsam:** Das Pixel-für-Pixel-Rendering des
+  Testbilds dauert ~5 Minuten (960×672 × 4 Sub-Frames × get_color-Lookup).
+  Im Normalbetrieb streamt das Gateway vorgerenderte RLE-Daten, kein Problem.
 
 Unterschiede zu den kleinen Panels (alles in `epd.c` unter `PANEL_97`):
-- **Zwei Controller (COGs):** Master = linke Hälfte, Slave = rechte Hälfte,
-  je eigener Chip-Select (CS / CSS), sonst gemeinsamer Bus.
-- **OTP:** Wellenform-/Spannungsparameter (80 Byte) stehen im COG und werden
-  einmal per 3-Draht-SPI gelesen (SDA bidirektional → Bit-Bang auf P0.3/P0.5),
-  danach in XDATA gecacht. Erstes Byte muss `0xA5` sein, sonst wird **nie**
-  refresht (Schutz vor falschem DC/DC-Ansteuern bei falschem Pinout).
+- **Zwei Controller (COGs):** Master = **rechte** Hälfte (CS = P0.7),
+  Slave = **linke** Hälfte (CSS = P0.1), sonst gemeinsamer Bus.
+- **OTP:** 80 Byte aus dem Master-COG per 3-Draht-SPI Bit-Bang, mit
+  hardcoded Fallback bei Lesefehler.
 - **DC/DC-Soft-Start** aus der OTP-Tabelle (Booster schaltet der COG selbst
   über Reg. 0x09, kein MCU-Pin nötig). Temperatur fest 25 °C.
 - **Polarität 1 = Tinte** (umgekehrt zu IL0373) → der Tag invertiert, Gateway
-  bleibt bei „0 = Tinte“.
-- **Frame:** 2 × 80 640 Byte (161 KB roh). Stream-Reihenfolge = COG-Reihen-
-  folge: Master-schwarz, Master-rot, Slave-schwarz, Slave-rot (je 672 Zeilen ×
-  60 Byte, zeilenweise, MSB = links). CS bleibt pro Teilbild über die Funk-
-  Pakete hinweg low.
+  bleibt bei „0 = Tinte”.
+- **Frame:** 4 × 40 320 Byte = 161 280 Byte roh. Stream-Reihenfolge:
+  Master-schwarz (rechts), Master-rot, Slave-schwarz (links), Slave-rot
+  (je 672 Zeilen × 60 Byte, zeilenweise, MSB = links).
 - Refresh dauert länger → `wait_busy` bis 120 s, Gateway wartet auf das
   SHOW-ACK bis 150 s.
 
-Build: `make display97` → `firmware/display97.bin` (10,5 KB). Enroll meldet
+Build: `make display97` → `firmware/display97.bin`. Enroll meldet
 `PANEL_TYPE = 2`, Gateway setzt automatisch hwType 0x2E (HA rendert 960×672).
 Manuell: `/settype?mac=...&type=97`.
-
-**⚠ Vor dem ersten Flashen Pinout prüfen** (Platine ist noch nicht
-durchgemessen). Angenommen ist das Pinout der kleinen Tags plus
-**Slave-CS = P0.7** (dort unbelegt) — reine Annahme, Definition oben in
-`epd.c` (`EPD_CSS`). Per Durchgangsprüfer vom Panel-FPC zum CC2510 messen:
-PWR-FET (P0.0), CS (P0.1), SDA (P0.3), SCK (P0.5), DC (P1.2), BUSY (P1.3),
-RESET (P2.0) und **CSS**. Vorher möglichst Original-Firmware per CC-Debugger
-sichern (falls nicht gelockt).
 
 Gateway-Shim: Ebenen jetzt pro Stream auf dem Heap (PSRAM bevorzugt), RLE
 wird während des Sendens erzeugt (kein Token-Puffer), JPEG-Upload geht direkt
@@ -158,7 +172,7 @@ XOR-Prüfsumme verwirft solche Pakete (ggf. später Retransmit/FEC ergänzen).
 | ESL Tag       | CC2510F32        | SoC mit 2.4GHz Radio           |
 | E-Ink 2,66"   | IL0373 (E2266)   | 296×152 BWR, SPI (P0.0=PWR, P0.1=CS, P1.2=DC, P1.3=BUSY, P2.0=RST) |
 | E-Ink 4,2"    | IL0398 (E2417JS0D1) | 400×300 BWR, identisches SPI-Pinout |
-| E-Ink 9,7"    | Pervasive E2969JS08 (2 COGs) | 960×672 BWR, + Slave-CS (Pin noch zu verifizieren) |
+| E-Ink 9,7"    | Pervasive E2969JS08 (2 COGs) | 960×672 BWR, CS=P0.7 (Master/rechts), CSS=P0.1 (Slave/links) |
 | Gateway       | ESP32-S3 + nRF24L01+ | SPI (CE=1, CSN=2, SCK=3, MISO=9, MOSI=7) |
 | Debugger      | ESP32-S3 (CCLib) | CC-Debug-Protokoll zum Flashen  |
 
