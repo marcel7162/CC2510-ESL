@@ -1,0 +1,68 @@
+# =============================================================================
+#  Template-Sensor: sensor.kalender_termine
+# -----------------------------------------------------------------------------
+#  Fuehrt die Termine aus zwei iCal-Kalendern (Integration "iCal Sensor",
+#  Entities sensor.ical_<name>_event_0 .. _N) zu EINER sortierten Liste
+#  zusammen. Das 9,7"-Layout (kalender_oepl_960.yaml) liest sie per
+#  state_attr('sensor.kalender_termine','events').
+#
+#  Jeder Eintrag in events:
+#    summary  Titel des Termins
+#    start    ISO-Zeit (lokal), z. B. 2026-11-28T00:00:00+01:00
+#    end      ISO-Zeit (lokal)
+#    all_day  true/false
+#    src      'muell' oder 'privat' (Muelltermine werden rot gedruckt)
+#
+#  Vergangene Termine fallen raus, maximal 8 (so viele Zeilen hat das Layout).
+#
+#  Einbauen: Inhalt in configuration.yaml (oder als Package) einfuegen, dann
+#  Entwicklerwerkzeuge -> YAML -> "Template-Entities" neu laden.
+#  Kalender-Namen anpassen: unten in KALENDER die Teile zwischen
+#  "sensor.ical_" und "_event_" eintragen.
+# =============================================================================
+
+template:
+  - trigger:
+      - trigger: time_pattern
+        minutes: "/10"
+      - trigger: homeassistant
+        event: start
+      - trigger: state
+        entity_id:
+          - sensor.ical_mulltonnen_event_0
+          - sensor.ical_urlitzki_event_0
+    variables:
+      termine: >-
+        {% set KALENDER = [('mulltonnen', 'muell'), ('urlitzki', 'privat')] %}
+        {% set ns = namespace(l=[]) %}
+        {% for name, src in KALENDER %}
+          {% for i in range(10) %}
+            {% set e = 'sensor.ical_' ~ name ~ '_event_' ~ i %}
+            {% set s = state_attr(e, 'start') %}
+            {% if s is not none and states(e) not in ['unknown', 'unavailable', ''] %}
+              {% set st = (s | string) | as_datetime | as_local %}
+              {% set en_raw = state_attr(e, 'end') %}
+              {% set en = ((en_raw | string) | as_datetime | as_local) if en_raw is not none else st %}
+              {% set ad = state_attr(e, 'all_day') %}
+              {% if ad is none %}
+                {% set ad = st.hour == 0 and st.minute == 0 %}
+              {% endif %}
+              {% if en >= now() or (ad and st.date() == now().date()) %}
+                {% set ns.l = ns.l + [{
+                  'summary': states(e),
+                  'start': st.isoformat(),
+                  'end': en.isoformat(),
+                  'all_day': ad,
+                  'src': src }] %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+        {{ (ns.l | sort(attribute='start'))[:8] }}
+    sensor:
+      - name: Kalender Termine
+        unique_id: pricetag_kalender_termine
+        icon: mdi:calendar-month
+        state: "{{ termine | count }}"
+        attributes:
+          events: "{{ termine }}"

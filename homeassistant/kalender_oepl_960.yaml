@@ -1,0 +1,383 @@
+# =============================================================================
+#  9,7" (960x672) - Kalenderblock (rechte Haelfte) fuer OEPL drawcustom
+# -----------------------------------------------------------------------------
+#  Ersetzt im Layout alles ab dem schwarzen "Termine"-Balken (rectangle
+#  x_start: 482 / y_start: 80) bis zum Ende. Braucht sensor.kalender_termine
+#  aus kalender_termine.yaml.
+#  8 Zeilen a 66 px: Datum (rot) | Uhrzeit oder "Ganztaegig" | Titel
+#  (Muell = rot, sonst schwarz) | Trennlinie.
+#  Generiert - Aenderungen am besten im Generator-Muster fuer alle 8 Slots.
+# =============================================================================
+- type: rectangle
+  x_start: 482
+  y_start: 80
+  x_end: 960
+  y_end: 124
+  fill: black
+- type: icon
+  value: calendar-month
+  x: 500
+  'y': 102
+  size: 30
+  color: white
+  anchor: lm
+- type: text
+  value: Termine
+  x: 536
+  'y': 102
+  size: 30
+  font: ppb.ttf
+  color: white
+  anchor: lm
+- type: text
+  value: >-
+    {% set n = states('sensor.kalender_termine') | int(0) %}{{ n }} {{ 'Eintrag' if n == 1 else 'Eintraege' }}
+  x: 940
+  'y': 102
+  size: 20
+  color: white
+  anchor: rm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{{ '' if ev else 'Keine Termine' }}
+  x: 500
+  'y': 152
+  size: 24
+  color: black
+  anchor: lm
+# ---- Termin 1 ----
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 0 %}{% set d = ev[0].start | as_datetime | as_local %}{{ ['Mo','Di','Mi','Do','Fr','Sa','So'][d.weekday()] }}, {{ d.strftime('%d.%m.') }}{% endif %}
+  x: 500
+  'y': 152
+  size: 20
+  color: red
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 0 %}{% if ev[0].all_day %}Ganztaegig{% else %}{{ (ev[0].start | as_datetime | as_local).strftime('%H:%M') }} - {{ (ev[0].end | as_datetime | as_local).strftime('%H:%M') }}{% endif %}{% endif %}
+  x: 940
+  'y': 152
+  size: 18
+  color: black
+  anchor: rm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 0 and ev[0].src != 'muell' %}{{ ev[0].summary[:34] }}{% endif %}
+  x: 500
+  'y': 178
+  size: 24
+  font: ppb.ttf
+  color: black
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 0 and ev[0].src == 'muell' %}{{ ev[0].summary[:34] }}{% endif %}
+  x: 500
+  'y': 178
+  size: 24
+  font: ppb.ttf
+  color: red
+  anchor: lm
+- type: line
+  x_start: 500
+  x_end: 940
+  y_start: 198
+  y_end: 198
+  fill: black
+  width: 1
+# ---- Termin 2 ----
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 1 %}{% set d = ev[1].start | as_datetime | as_local %}{{ ['Mo','Di','Mi','Do','Fr','Sa','So'][d.weekday()] }}, {{ d.strftime('%d.%m.') }}{% endif %}
+  x: 500
+  'y': 218
+  size: 20
+  color: red
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 1 %}{% if ev[1].all_day %}Ganztaegig{% else %}{{ (ev[1].start | as_datetime | as_local).strftime('%H:%M') }} - {{ (ev[1].end | as_datetime | as_local).strftime('%H:%M') }}{% endif %}{% endif %}
+  x: 940
+  'y': 218
+  size: 18
+  color: black
+  anchor: rm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 1 and ev[1].src != 'muell' %}{{ ev[1].summary[:34] }}{% endif %}
+  x: 500
+  'y': 244
+  size: 24
+  font: ppb.ttf
+  color: black
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 1 and ev[1].src == 'muell' %}{{ ev[1].summary[:34] }}{% endif %}
+  x: 500
+  'y': 244
+  size: 24
+  font: ppb.ttf
+  color: red
+  anchor: lm
+- type: line
+  x_start: 500
+  x_end: 940
+  y_start: 264
+  y_end: 264
+  fill: black
+  width: 1
+# ---- Termin 3 ----
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 2 %}{% set d = ev[2].start | as_datetime | as_local %}{{ ['Mo','Di','Mi','Do','Fr','Sa','So'][d.weekday()] }}, {{ d.strftime('%d.%m.') }}{% endif %}
+  x: 500
+  'y': 284
+  size: 20
+  color: red
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 2 %}{% if ev[2].all_day %}Ganztaegig{% else %}{{ (ev[2].start | as_datetime | as_local).strftime('%H:%M') }} - {{ (ev[2].end | as_datetime | as_local).strftime('%H:%M') }}{% endif %}{% endif %}
+  x: 940
+  'y': 284
+  size: 18
+  color: black
+  anchor: rm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 2 and ev[2].src != 'muell' %}{{ ev[2].summary[:34] }}{% endif %}
+  x: 500
+  'y': 310
+  size: 24
+  font: ppb.ttf
+  color: black
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 2 and ev[2].src == 'muell' %}{{ ev[2].summary[:34] }}{% endif %}
+  x: 500
+  'y': 310
+  size: 24
+  font: ppb.ttf
+  color: red
+  anchor: lm
+- type: line
+  x_start: 500
+  x_end: 940
+  y_start: 330
+  y_end: 330
+  fill: black
+  width: 1
+# ---- Termin 4 ----
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 3 %}{% set d = ev[3].start | as_datetime | as_local %}{{ ['Mo','Di','Mi','Do','Fr','Sa','So'][d.weekday()] }}, {{ d.strftime('%d.%m.') }}{% endif %}
+  x: 500
+  'y': 350
+  size: 20
+  color: red
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 3 %}{% if ev[3].all_day %}Ganztaegig{% else %}{{ (ev[3].start | as_datetime | as_local).strftime('%H:%M') }} - {{ (ev[3].end | as_datetime | as_local).strftime('%H:%M') }}{% endif %}{% endif %}
+  x: 940
+  'y': 350
+  size: 18
+  color: black
+  anchor: rm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 3 and ev[3].src != 'muell' %}{{ ev[3].summary[:34] }}{% endif %}
+  x: 500
+  'y': 376
+  size: 24
+  font: ppb.ttf
+  color: black
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 3 and ev[3].src == 'muell' %}{{ ev[3].summary[:34] }}{% endif %}
+  x: 500
+  'y': 376
+  size: 24
+  font: ppb.ttf
+  color: red
+  anchor: lm
+- type: line
+  x_start: 500
+  x_end: 940
+  y_start: 396
+  y_end: 396
+  fill: black
+  width: 1
+# ---- Termin 5 ----
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 4 %}{% set d = ev[4].start | as_datetime | as_local %}{{ ['Mo','Di','Mi','Do','Fr','Sa','So'][d.weekday()] }}, {{ d.strftime('%d.%m.') }}{% endif %}
+  x: 500
+  'y': 416
+  size: 20
+  color: red
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 4 %}{% if ev[4].all_day %}Ganztaegig{% else %}{{ (ev[4].start | as_datetime | as_local).strftime('%H:%M') }} - {{ (ev[4].end | as_datetime | as_local).strftime('%H:%M') }}{% endif %}{% endif %}
+  x: 940
+  'y': 416
+  size: 18
+  color: black
+  anchor: rm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 4 and ev[4].src != 'muell' %}{{ ev[4].summary[:34] }}{% endif %}
+  x: 500
+  'y': 442
+  size: 24
+  font: ppb.ttf
+  color: black
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 4 and ev[4].src == 'muell' %}{{ ev[4].summary[:34] }}{% endif %}
+  x: 500
+  'y': 442
+  size: 24
+  font: ppb.ttf
+  color: red
+  anchor: lm
+- type: line
+  x_start: 500
+  x_end: 940
+  y_start: 462
+  y_end: 462
+  fill: black
+  width: 1
+# ---- Termin 6 ----
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 5 %}{% set d = ev[5].start | as_datetime | as_local %}{{ ['Mo','Di','Mi','Do','Fr','Sa','So'][d.weekday()] }}, {{ d.strftime('%d.%m.') }}{% endif %}
+  x: 500
+  'y': 482
+  size: 20
+  color: red
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 5 %}{% if ev[5].all_day %}Ganztaegig{% else %}{{ (ev[5].start | as_datetime | as_local).strftime('%H:%M') }} - {{ (ev[5].end | as_datetime | as_local).strftime('%H:%M') }}{% endif %}{% endif %}
+  x: 940
+  'y': 482
+  size: 18
+  color: black
+  anchor: rm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 5 and ev[5].src != 'muell' %}{{ ev[5].summary[:34] }}{% endif %}
+  x: 500
+  'y': 508
+  size: 24
+  font: ppb.ttf
+  color: black
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 5 and ev[5].src == 'muell' %}{{ ev[5].summary[:34] }}{% endif %}
+  x: 500
+  'y': 508
+  size: 24
+  font: ppb.ttf
+  color: red
+  anchor: lm
+- type: line
+  x_start: 500
+  x_end: 940
+  y_start: 528
+  y_end: 528
+  fill: black
+  width: 1
+# ---- Termin 7 ----
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 6 %}{% set d = ev[6].start | as_datetime | as_local %}{{ ['Mo','Di','Mi','Do','Fr','Sa','So'][d.weekday()] }}, {{ d.strftime('%d.%m.') }}{% endif %}
+  x: 500
+  'y': 548
+  size: 20
+  color: red
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 6 %}{% if ev[6].all_day %}Ganztaegig{% else %}{{ (ev[6].start | as_datetime | as_local).strftime('%H:%M') }} - {{ (ev[6].end | as_datetime | as_local).strftime('%H:%M') }}{% endif %}{% endif %}
+  x: 940
+  'y': 548
+  size: 18
+  color: black
+  anchor: rm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 6 and ev[6].src != 'muell' %}{{ ev[6].summary[:34] }}{% endif %}
+  x: 500
+  'y': 574
+  size: 24
+  font: ppb.ttf
+  color: black
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 6 and ev[6].src == 'muell' %}{{ ev[6].summary[:34] }}{% endif %}
+  x: 500
+  'y': 574
+  size: 24
+  font: ppb.ttf
+  color: red
+  anchor: lm
+- type: line
+  x_start: 500
+  x_end: 940
+  y_start: 594
+  y_end: 594
+  fill: black
+  width: 1
+# ---- Termin 8 ----
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 7 %}{% set d = ev[7].start | as_datetime | as_local %}{{ ['Mo','Di','Mi','Do','Fr','Sa','So'][d.weekday()] }}, {{ d.strftime('%d.%m.') }}{% endif %}
+  x: 500
+  'y': 614
+  size: 20
+  color: red
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 7 %}{% if ev[7].all_day %}Ganztaegig{% else %}{{ (ev[7].start | as_datetime | as_local).strftime('%H:%M') }} - {{ (ev[7].end | as_datetime | as_local).strftime('%H:%M') }}{% endif %}{% endif %}
+  x: 940
+  'y': 614
+  size: 18
+  color: black
+  anchor: rm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 7 and ev[7].src != 'muell' %}{{ ev[7].summary[:34] }}{% endif %}
+  x: 500
+  'y': 640
+  size: 24
+  font: ppb.ttf
+  color: black
+  anchor: lm
+- type: text
+  value: >-
+    {% set ev = state_attr('sensor.kalender_termine','events') %}{% if ev and ev|length > 7 and ev[7].src == 'muell' %}{{ ev[7].summary[:34] }}{% endif %}
+  x: 500
+  'y': 640
+  size: 24
+  font: ppb.ttf
+  color: red
+  anchor: lm
+- type: line
+  x_start: 500
+  x_end: 940
+  y_start: 660
+  y_end: 660
+  fill: black
+  width: 1
